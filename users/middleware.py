@@ -1,6 +1,9 @@
 # users/middleware.py
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.utils.deprecation import MiddlewareMixin
+
+User = get_user_model()
 
 
 class LastSeenMiddleware(MiddlewareMixin):
@@ -29,8 +32,7 @@ class LastSeenMiddleware(MiddlewareMixin):
             (now - last_db_update).total_seconds() > self.UPDATE_INTERVAL_SEC):
             
             # Update direct sans charger l'instance (plus rapide)
-            type(request.user).objects.filter(id=request.user.id).update(
-                last_seen=now)
+            User.objects.filter(id=request.user.id).update(last_seen=now)
             self._last_update_cache[user_id] = now
         
         return None
