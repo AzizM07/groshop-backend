@@ -12,4 +12,5 @@ urlpatterns = [
     path('api/messaging/',     include('messaging.urls')),
     path('api/gamification/',  include('gamification.urls')),
     path('api/store/',         include('store.urls')),
+    path('api/analytics/', include('analytics.urls')),
 ]

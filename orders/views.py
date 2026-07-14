@@ -3,19 +3,23 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+
 from django.db import transaction
+from django.db.models import Count, F
 from django.shortcuts import get_object_or_404
+
+from analytics.tracking import attribute_order
+from products.models import Product
 
 from .models import Order, SubOrder, OrderItem, CartItem
 from .serializers import (
     OrderListSerializer, OrderDetailSerializer, CreateOrderSerializer,
-    CartItemSerializer,
+    CartItemSerializer, SupplierSubOrderSerializer,
 )
-from products.models import Product
 
 
 # ══════════════════════════════════════════════════════════════════
-# ORDERS
+# ORDERS — ACHETEUR
 # ══════════════════════════════════════════════════════════════════
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -114,11 +118,15 @@ def create_order(request):
                     unit_price_tnd = item['unit_price'],
                     total_tnd      = item['total'],
                 )
+                # F() : incrément côté base → pas de perte si commandes simultanées
                 Product.objects.filter(id=item['product'].id).update(
-                    sold_count=item['product'].sold_count + item['quantity'])
+                    sold_count=F('sold_count') + item['quantity'])
 
         order.total_tnd = total_order
         order.save()
+
+        # ── Attribution analytics : canal + région + session convertie ──
+        attribute_order(order, request)
 
     return Response(
         OrderDetailSerializer(order).data,
@@ -136,6 +144,51 @@ def cancel_order(request, pk):
     order.status = 'cancelled'
     order.save()
     return Response({'message': 'Commande annulée.'})
+
+
+# ══════════════════════════════════════════════════════════════════
+# ORDERS — FOURNISSEUR
+# ══════════════════════════════════════════════════════════════════
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def supplier_orders(request):
+    if not hasattr(request.user, 'supplier_profile'):
+        return Response({'error': 'Compte fournisseur requis.'}, status=403)
+    supplier = request.user.supplier_profile
+
+    qs = SubOrder.objects.filter(supplier=supplier).select_related(
+        'order', 'order__buyer'
+    ).prefetch_related('items__product__images').order_by('-created_at')
+
+    st = request.query_params.get('status')
+    if st and st != 'all':
+        qs = qs.filter(status=st)
+
+    base   = SubOrder.objects.filter(supplier=supplier)
+    counts = {r['status']: r['c'] for r in base.values('status').annotate(c=Count('id'))}
+    counts['all'] = base.count()
+
+    return Response({
+        'results': SupplierSubOrderSerializer(qs, many=True).data,
+        'counts':  counts,
+    })
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def supplier_suborder_update(request, pk):
+    if not hasattr(request.user, 'supplier_profile'):
+        return Response({'error': 'Compte fournisseur requis.'}, status=403)
+    try:
+        so = SubOrder.objects.get(id=pk, supplier=request.user.supplier_profile)
+    except SubOrder.DoesNotExist:
+        return Response({'error': 'Sous-commande non trouvée.'}, status=404)
+    new_status = request.data.get('status')
+    if new_status not in dict(SubOrder.STATUS):
+        return Response({'error': 'Statut invalide.'}, status=400)
+    so.status = new_status
+    so.save(update_fields=['status', 'updated_at'])
+    return Response(SupplierSubOrderSerializer(so).data)
 
 
 # ══════════════════════════════════════════════════════════════════

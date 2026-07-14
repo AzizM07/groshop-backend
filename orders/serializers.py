@@ -7,16 +7,15 @@ from .models import Order, SubOrder, OrderItem, CartItem
 # ORDER ITEM
 # ══════════════════════════════════════════════════════════════════
 class OrderItemSerializer(serializers.ModelSerializer):
-
-    product_name  = serializers.CharField(source='product.name', read_only=True)
-    product_slug  = serializers.CharField(source='product.slug', read_only=True)
-    product_image = serializers.SerializerMethodField()
+    product_name     = serializers.CharField(source='product.name', read_only=True)
+    product_slug     = serializers.CharField(source='product.slug', read_only=True)
+    product_category = serializers.CharField(source='product.category.name', read_only=True)  # ← AJOUT
+    product_image    = serializers.SerializerMethodField()
 
     class Meta:
         model  = OrderItem
-        fields = ['id', 'product_name', 'product_slug', 'product_image',
+        fields = ['id', 'product_name', 'product_slug', 'product_category', 'product_image',
                   'quantity', 'unit_price_tnd', 'total_tnd']
-
     def get_product_image(self, obj):
         image = obj.product.images.filter(is_primary=True).first()
         if not image:
@@ -148,3 +147,27 @@ class CartItemSerializer(serializers.ModelSerializer):
             'name':  getattr(v, 'name', ''),
             'sku':   getattr(v, 'sku', ''),
         }
+class SupplierSubOrderSerializer(serializers.ModelSerializer):
+    order_id       = serializers.UUIDField(source='order.id', read_only=True)
+    buyer_name     = serializers.CharField(source='order.buyer.full_name', read_only=True)
+    payment_method = serializers.CharField(source='order.payment_method', read_only=True)
+    payment_status = serializers.CharField(source='order.payment_status', read_only=True)
+    items          = OrderItemSerializer(many=True, read_only=True)
+    items_count    = serializers.SerializerMethodField()
+    primary_image  = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = SubOrder
+        fields = ['id', 'order_id', 'status', 'subtotal_tnd', 'delivery_type',
+                  'created_at', 'buyer_name', 'payment_method', 'payment_status',
+                  'items', 'items_count', 'primary_image']
+
+    def get_items_count(self, obj):
+        return obj.items.count()
+
+    def get_primary_image(self, obj):
+        first = obj.items.first()
+        if not first:
+            return None
+        img = first.product.images.filter(is_primary=True).first() or first.product.images.first()
+        return img.url if img else None
