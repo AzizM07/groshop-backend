@@ -84,7 +84,19 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'groshop.wsgi.application'
 
+# ⭐ Domaine des cookies — vide en local, '.groshop.tn' en prod
+# Le point initial fait que le cookie posé par api.groshop.tn
+# est renvoyé à groshop.tn (même site → SameSite=Lax suffit)
+COOKIE_DOMAIN = config('COOKIE_DOMAIN', default='') or None
 
+SESSION_COOKIE_DOMAIN = COOKIE_DOMAIN
+CSRF_COOKIE_DOMAIN    = COOKIE_DOMAIN
+
+# Réglages repris par tes vues d'auth
+AUTH_COOKIE_DOMAIN   = COOKIE_DOMAIN
+AUTH_COOKIE_SECURE   = not DEBUG
+AUTH_COOKIE_SAMESITE = 'Lax'
+AUTH_COOKIE_HTTPONLY = True
 # ═══════════════════════════════════════════════════════════════════
 # DATABASE — Neon PostgreSQL en prod, local en dev
 # ═══════════════════════════════════════════════════════════════════

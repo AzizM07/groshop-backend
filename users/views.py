@@ -5,6 +5,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
+from django.conf import settings
 from django.contrib.auth import authenticate
 from .serializers import RegisterBuyerSerializer, RegisterSupplierSerializer, UserSerializer, SupplierPublicSerializer
 from .models import User, SupplierProfile, SupplierStore
@@ -14,11 +15,25 @@ from google.auth.transport import requests as google_requests
 
 GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID')
 
-ACCESS_MAX_AGE  = 15 * 60          # 15 min
+ACCESS_MAX_AGE  = 15 * 60           # 15 min
 REFRESH_MAX_AGE = 7 * 24 * 60 * 60  # 7 jours
 
-# ⚠️ secure=False en dev (HTTP). Mettre True en prod (HTTPS).
-COOKIE_SECURE = False
+REFRESH_PATH = '/api/auth/refresh/'
+
+# ═══════════════════════════════════════════════════════════════════
+# COOKIES
+# ═══════════════════════════════════════════════════════════════════
+# Secure suit DEBUG : False en local (HTTP), True en prod (HTTPS).
+COOKIE_SECURE = not settings.DEBUG
+
+# SameSite='Lax' suffit tant que le front (groshop.tn) et l'API (api.groshop.tn)
+# partagent le même domaine enregistrable → requêtes same-site.
+# Si un jour l'API repasse sur un autre domaine, il faudrait 'None' + Secure.
+COOKIE_SAMESITE = getattr(settings, 'AUTH_COOKIE_SAMESITE', 'Lax')
+
+# None = cookie host-only (recommandé). Ne définir un domaine que si plusieurs
+# sous-domaines doivent partager la session — ça élargit la surface d'attaque.
+COOKIE_DOMAIN = getattr(settings, 'AUTH_COOKIE_DOMAIN', None) or None
 
 
 def get_tokens_for_user(user):
@@ -26,30 +41,41 @@ def get_tokens_for_user(user):
     return refresh, refresh.access_token
 
 
-def set_auth_cookies(response, access, refresh):
+def _set_access_cookie(response, access):
     response.set_cookie(
         key='access_token',
         value=str(access),
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite='Lax',
+        samesite=COOKIE_SAMESITE,
+        domain=COOKIE_DOMAIN,
         max_age=ACCESS_MAX_AGE,
         path='/',
     )
+
+
+def _set_refresh_cookie(response, refresh):
     response.set_cookie(
         key='refresh_token',
         value=str(refresh),
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite='Lax',
+        samesite=COOKIE_SAMESITE,
+        domain=COOKIE_DOMAIN,
         max_age=REFRESH_MAX_AGE,
-        path='/api/auth/refresh/',  # limité à cet endpoint
+        path=REFRESH_PATH,  # limité à cet endpoint
     )
 
 
+def set_auth_cookies(response, access, refresh):
+    _set_access_cookie(response, access)
+    _set_refresh_cookie(response, refresh)
+
+
 def clear_auth_cookies(response):
-    response.delete_cookie('access_token', path='/')
-    response.delete_cookie('refresh_token', path='/api/auth/refresh/')
+    # domain/samesite doivent correspondre à la pose, sinon le cookie survit
+    response.delete_cookie('access_token', path='/', domain=COOKIE_DOMAIN, samesite=COOKIE_SAMESITE)
+    response.delete_cookie('refresh_token', path=REFRESH_PATH, domain=COOKIE_DOMAIN, samesite=COOKIE_SAMESITE)
 
 
 class LoginThrottle(ScopedRateThrottle):
@@ -142,41 +168,38 @@ def refresh_view(request):
 
     try:
         old_refresh = RefreshToken(refresh_token)
-        access = old_refresh.access_token
     except TokenError:
         return Response({'error': 'Session expirée. Reconnectez-vous.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-    response = Response({'message': 'Token rafraîchi.'})
+    rotate = settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS', False)
 
-    response.set_cookie(
-        key='access_token',
-        value=str(access),
-        httponly=True, secure=COOKIE_SECURE, samesite='Lax',
-        max_age=ACCESS_MAX_AGE, path='/',
-    )
+    if not rotate:
+        response = Response({'message': 'Token rafraîchi.'})
+        _set_access_cookie(response, old_refresh.access_token)
+        return response
 
-    # ── Rotation du refresh token (ROTATE_REFRESH_TOKENS=True) ──
-    if getattr(old_refresh, 'algorithm', None) is not None:
+    # ── Rotation ──────────────────────────────────────────────────
+    user_id = old_refresh.payload.get('user_id')
+    try:
+        user = User.objects.get(id=user_id, is_active=True)
+    except User.DoesNotExist:
+        response = Response({'error': 'Session invalide.'}, status=status.HTTP_401_UNAUTHORIZED)
+        clear_auth_cookies(response)
+        return response
+
+    new_refresh = RefreshToken.for_user(user)
+
+    # Blackliste l'ancien APRÈS avoir émis le nouveau (BLACKLIST_AFTER_ROTATION)
+    if settings.SIMPLE_JWT.get('BLACKLIST_AFTER_ROTATION', False):
         try:
-            user_id = old_refresh.payload.get('user_id')
-            user = User.objects.get(id=user_id)
-            new_refresh = RefreshToken.for_user(user)
-
-            # Blackliste l'ancien refresh token
-            try:
-                old_refresh.blacklist()
-            except Exception:
-                pass
-
-            response.set_cookie(
-                key='refresh_token',
-                value=str(new_refresh),
-                httponly=True, secure=COOKIE_SECURE, samesite='Lax',
-                max_age=REFRESH_MAX_AGE, path='/api/auth/refresh/',
-            )
-        except (User.DoesNotExist, Exception):
+            old_refresh.blacklist()
+        except AttributeError:
+            # token_blacklist non installé — on ignore silencieusement
             pass
 
+    response = Response({'message': 'Token rafraîchi.'})
+    _set_access_cookie(response, new_refresh.access_token)
+    _set_refresh_cookie(response, new_refresh)
     return response
 
 
@@ -197,7 +220,7 @@ def logout(request):
         try:
             token = RefreshToken(refresh_token)
             token.blacklist()
-        except TokenError:
+        except (TokenError, AttributeError):
             pass  # token déjà invalide/expiré — pas grave
 
     response = Response({'message': 'Déconnecté avec succès.'})
@@ -248,8 +271,8 @@ def supplier_products(request, slug):
     serializer = ProductListSerializer(products, many=True)
     return Response(serializer.data)
 
-# ── À ajouter à la fin de users/views.py ──
 
+# ── Google One Tap ────────────────────────────────────────────────
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def google_one_tap(request):
@@ -306,8 +329,8 @@ def google_one_tap(request):
     set_auth_cookies(response, access, refresh)
     return response
 
-# ── À ajouter dans users/views.py ──
 
+# ── Supplier me ───────────────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def supplier_me(request):
