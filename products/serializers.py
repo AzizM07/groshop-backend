@@ -8,6 +8,19 @@ from .models import (
 )
 
 
+# ── Helper partagé : image primaire sans requête SQL ───────────────
+def _primary_image_url(product):
+    """
+    ⚡ .all() → utilise le cache du prefetch_related('images') (0 requête).
+       .filter(is_primary=True) relancerait une requête par produit → N+1.
+    """
+    images = product.images.all()
+    for img in images:
+        if img.is_primary:
+            return img.url
+    return images[0].url if images else None
+
+
 # ══════════════════════════════════════════════════════════════════
 #  LECTURE
 # ══════════════════════════════════════════════════════════════════
@@ -59,7 +72,8 @@ class ProductListSerializer(serializers.ModelSerializer):
     supplier_slug     = serializers.CharField(source='supplier.slug', read_only=True)
     supplier_verified = serializers.CharField(source='supplier.verification_status', read_only=True)
     supplier_medals   = serializers.SerializerMethodField()
-    category_name     = serializers.CharField(source='category.name', read_only=True)
+    category_name     = serializers.CharField(source='category.name', read_only=True,
+                                              allow_null=True, default=None)
     years_active      = serializers.SerializerMethodField()
     price_tiers       = ProductPriceTierSerializer(many=True, read_only=True)
 
@@ -80,13 +94,11 @@ class ProductListSerializer(serializers.ModelSerializer):
         ]
 
     def get_primary_image(self, obj):
-        image = obj.images.filter(is_primary=True).first()
-        if not image:
-            image = obj.images.first()
-        return image.url if image else None
+        return _primary_image_url(obj)
 
     def get_years_active(self, obj):
         from datetime import date
+        # ⚠️ nécessite select_related('supplier__store') dans la vue, sinon 1 requête/produit
         store = getattr(obj.supplier, 'store', None)
         if store and store.founded_year:
             return date.today().year - store.founded_year
@@ -117,8 +129,10 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     supplier_wilaya       = serializers.CharField(source='supplier.wilaya', read_only=True)
     supplier_verified     = serializers.CharField(source='supplier.verification_status', read_only=True)
 
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    category_slug = serializers.CharField(source='category.slug', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True,
+                                          allow_null=True, default=None)
+    category_slug = serializers.CharField(source='category.slug', read_only=True,
+                                          allow_null=True, default=None)
 
     class Meta:
         model  = Product
@@ -165,7 +179,8 @@ class ReviewPhotoSerializer(serializers.ModelSerializer):
 class ReviewSerializer(serializers.ModelSerializer):
 
     reviewer_name = serializers.CharField(source='reviewer.full_name', read_only=True)
-    variant_name  = serializers.CharField(source='variant.name', read_only=True)
+    variant_name  = serializers.CharField(source='variant.name', read_only=True,
+                                          allow_null=True, default=None)
     photos        = ReviewPhotoSerializer(many=True, read_only=True)
 
     class Meta:
@@ -245,8 +260,10 @@ class ProductCreateSerializer(serializers.ModelSerializer):
 
 # ── Liste fournisseur (page "Mes produits") ───────────────────────
 class SupplierProductSerializer(serializers.ModelSerializer):
+
     primary_image = serializers.SerializerMethodField()
-    category_name = serializers.CharField(source='category.name', read_only=True)
+    category_name = serializers.CharField(source='category.name', read_only=True,
+                                          allow_null=True, default=None)
 
     class Meta:
         model  = Product
@@ -256,5 +273,4 @@ class SupplierProductSerializer(serializers.ModelSerializer):
                   'is_free_shipping', 'category_name', 'primary_image', 'created_at']
 
     def get_primary_image(self, obj):
-        img = obj.images.filter(is_primary=True).first() or obj.images.first()
-        return img.url if img else None
+        return _primary_image_url(obj)

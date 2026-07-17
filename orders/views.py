@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from django.db import transaction
-from django.db.models import Count, F
+from django.db.models import Count, F, Prefetch
 from django.shortcuts import get_object_or_404
 
 from analytics.tracking import attribute_order
@@ -18,13 +18,26 @@ from .serializers import (
 )
 
 
+# ── Prefetch réutilisable : items + produit + catégorie + images ───
+# select_related dans le Prefetch → produit & catégorie ramenés en 1 requête (JOIN)
+ITEMS_PREFETCH = Prefetch(
+    'items',
+    queryset=OrderItem.objects
+        .select_related('product', 'product__category')
+        .prefetch_related('product__images'),
+)
+
+
 # ══════════════════════════════════════════════════════════════════
 # ORDERS — ACHETEUR
 # ══════════════════════════════════════════════════════════════════
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def orders_list(request):
-    orders = Order.objects.filter(buyer=request.user).order_by('-created_at')
+    orders = (Order.objects
+              .filter(buyer=request.user)
+              .prefetch_related('sub_orders')     # ⚡ pour get_sub_orders_count
+              .order_by('-created_at'))
     serializer = OrderListSerializer(orders, many=True)
     return Response(serializer.data)
 
@@ -34,7 +47,9 @@ def orders_list(request):
 def order_detail(request, pk):
     try:
         order = Order.objects.prefetch_related(
-            'sub_orders__items__product__images'
+            Prefetch('sub_orders', queryset=SubOrder.objects
+                     .select_related('supplier')
+                     .prefetch_related(ITEMS_PREFETCH)),
         ).get(id=pk, buyer=request.user)
     except Order.DoesNotExist:
         return Response({'error': 'Commande non trouvée.'}, status=404)
@@ -156,17 +171,20 @@ def supplier_orders(request):
         return Response({'error': 'Compte fournisseur requis.'}, status=403)
     supplier = request.user.supplier_profile
 
-    qs = SubOrder.objects.filter(supplier=supplier).select_related(
-        'order', 'order__buyer'
-    ).prefetch_related('items__product__images').order_by('-created_at')
+    qs = (SubOrder.objects
+          .filter(supplier=supplier)
+          .select_related('order', 'order__buyer')
+          .prefetch_related(ITEMS_PREFETCH)
+          .order_by('-created_at'))
 
     st = request.query_params.get('status')
     if st and st != 'all':
         qs = qs.filter(status=st)
 
-    base   = SubOrder.objects.filter(supplier=supplier)
-    counts = {r['status']: r['c'] for r in base.values('status').annotate(c=Count('id'))}
-    counts['all'] = base.count()
+    # ⚡ 1 requête pour tous les compteurs (avant : 2)
+    rows = SubOrder.objects.filter(supplier=supplier).values('status').annotate(c=Count('id'))
+    counts = {r['status']: r['c'] for r in rows}
+    counts['all'] = sum(counts.values())
 
     return Response({
         'results': SupplierSubOrderSerializer(qs, many=True).data,
@@ -180,7 +198,10 @@ def supplier_suborder_update(request, pk):
     if not hasattr(request.user, 'supplier_profile'):
         return Response({'error': 'Compte fournisseur requis.'}, status=403)
     try:
-        so = SubOrder.objects.get(id=pk, supplier=request.user.supplier_profile)
+        so = (SubOrder.objects
+              .select_related('order', 'order__buyer')
+              .prefetch_related(ITEMS_PREFETCH)
+              .get(id=pk, supplier=request.user.supplier_profile))
     except SubOrder.DoesNotExist:
         return Response({'error': 'Sous-commande non trouvée.'}, status=404)
     new_status = request.data.get('status')
@@ -248,7 +269,11 @@ def cart_item_view(request, pk):
     PATCH  /api/cart/<id>/   → modifie la qty
     DELETE /api/cart/<id>/   → supprime l'item
     """
-    item = get_object_or_404(CartItem, id=pk, buyer=request.user)
+    item = get_object_or_404(
+        CartItem.objects.select_related('product', 'product__supplier', 'variant')
+                        .prefetch_related('product__images', 'product__price_tiers'),
+        id=pk, buyer=request.user,
+    )
 
     if request.method == 'DELETE':
         item.delete()

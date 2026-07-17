@@ -1,12 +1,13 @@
 # analytics/views.py — GROSHOP.tn
 from datetime import timedelta
 
-from rest_framework import generics, permissions
+from rest_framework import generics
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, AllowAny
 from rest_framework.response import Response
 
-from django.db.models import Count, Sum
+from django.db.models import Count, Sum, Q
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from .models import PageView, Session, MonthlyTarget, OrderChannel, OrderRegion
@@ -66,7 +67,7 @@ def track_pageview(request):
 
     ser.save(
         user=user,
-        session=session,                                   # ⚠️ FIX : lie la vraie FK
+        session=session,
         user_agent=request.META.get('HTTP_USER_AGENT', '')[:1000],
     )
     return Response({'ok': True}, status=201)
@@ -76,7 +77,7 @@ def track_pageview(request):
 # STATS AUDIENCE / CONVERSION
 # ══════════════════════════════════════════════════════════════════
 class SupplierAnalyticsView(generics.GenericAPIView):
-    """GET /api/analytics/supplier/stats/ — audience, canaux, conversion (mois en cours)."""
+    """GET /api/analytics/supplier/stats/ — audience, canaux, conversion, séries journalières."""
     permission_classes = [IsSupplier]
 
     def get(self, request):
@@ -86,44 +87,79 @@ class SupplierAnalyticsView(generics.GenericAPIView):
 
         views_qs = PageView.objects.filter(supplier=supplier, viewed_at__gte=month_start)
 
-        views_month     = views_qs.count()
-        unique_visitors = views_qs.values('session_id').distinct().count()
+        # ⚡ 1 seule requête pour le total + les uniques (au lieu de 2)
+        agg = views_qs.aggregate(
+            total=Count('id'),
+            uniques=Count('session_key', distinct=True),   # session_key = la chaîne, pas la FK
+        )
+        views_month     = agg['total'] or 0
+        unique_visitors = agg['uniques'] or 0
 
         by_channel = list(views_qs.values('channel').annotate(count=Count('id')).order_by('-count'))
         by_device  = list(views_qs.values('device_type').annotate(count=Count('id')).order_by('-count'))
         by_page    = list(views_qs.values('page_type').annotate(count=Count('id')).order_by('-count'))
 
         # ── Conversion : sessions ayant vu ce fournisseur ──
-        # ⚠️ FIX : passe par la FK 'pageviews' (avant : 'pageview__supplier' → n'existait pas)
         sessions_qs = Session.objects.filter(
             pageviews__supplier=supplier, started_at__gte=month_start
         ).distinct()
 
-        sessions_count  = sessions_qs.count()
-        converted_count = sessions_qs.filter(converted=True).count()
+        # ⚡ 1 requête pour sessions + converties (au lieu de 2)
+        s_agg = sessions_qs.aggregate(
+            total=Count('id', distinct=True),
+            conv=Count('id', distinct=True, filter=Q(converted=True)),
+        )
+        sessions_count  = s_agg['total'] or 0
+        converted_count = s_agg['conv'] or 0
         conversion_rate = round(converted_count / sessions_count * 100, 2) if sessions_count else 0
 
-        # Conversion par canal
-        conv_by_channel = []
-        for row in sessions_qs.values('channel').annotate(total=Count('id', distinct=True)):
-            conv = sessions_qs.filter(channel=row['channel'], converted=True).count()
-            conv_by_channel.append({
-                'channel': row['channel'],
-                'sessions': row['total'],
-                'converted': conv,
-                'rate': round(conv / row['total'] * 100, 2) if row['total'] else 0,
-            })
+        # ⚡ 1 requête au lieu d'une par canal (avant : boucle → N requêtes)
+        conv_rows = sessions_qs.values('channel').annotate(
+            total=Count('id', distinct=True),
+            conv=Count('id', distinct=True, filter=Q(converted=True)),
+        )
+        conv_by_channel = [{
+            'channel':   r['channel'],
+            'sessions':  r['total'],
+            'converted': r['conv'],
+            'rate':      round(r['conv'] / r['total'] * 100, 2) if r['total'] else 0,
+        } for r in conv_rows]
+
+        # ── Séries journalières (14 derniers jours) — graphes hebdo du dashboard ──
+        d14 = (now - timedelta(days=13)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        daily = (PageView.objects
+                 .filter(supplier=supplier, viewed_at__gte=d14)
+                 .annotate(d=TruncDate('viewed_at')).values('d')
+                 .annotate(
+                     views=Count('id'),
+                     uniques=Count('session_key', distinct=True),
+                     product_views=Count('id', filter=Q(page_type='product_detail')),
+                 )
+                 .order_by('d'))
+        rows = list(daily)   # ⚡ 1 requête pour les 2 séries (avant : 2 requêtes)
+
+        views_by_day = [
+            {'date': r['d'].isoformat(), 'views': r['views'], 'uniques': r['uniques']}
+            for r in rows
+        ]
+        product_views_by_day = [
+            {'date': r['d'].isoformat(), 'views': r['product_views']}
+            for r in rows
+        ]
 
         return Response({
-            'views_month':      views_month,
-            'unique_visitors':  unique_visitors,
-            'sessions_count':   sessions_count,
-            'converted_count':  converted_count,
-            'conversion_rate':  conversion_rate,
-            'by_channel':       by_channel,
-            'by_device':        by_device,
-            'by_page_type':     by_page,
+            'views_month':           views_month,
+            'unique_visitors':       unique_visitors,
+            'sessions_count':        sessions_count,
+            'converted_count':       converted_count,
+            'conversion_rate':       conversion_rate,
+            'by_channel':            by_channel,
+            'by_device':             by_device,
+            'by_page_type':          by_page,
             'conversion_by_channel': conv_by_channel,
+            'views_by_day':          views_by_day,
+            'product_views_by_day':  product_views_by_day,
         })
 
 
@@ -134,20 +170,23 @@ class SupplierActiveUsersView(generics.GenericAPIView):
     def get(self, request):
         supplier = request.user.supplier_profile
         now      = timezone.now()
-        base     = PageView.objects.filter(supplier=supplier)
 
-        windows = {
-            'dau': now - timedelta(days=1),
-            'wau': now - timedelta(days=7),
-            'mau': now - timedelta(days=30),
-        }
+        d1  = now - timedelta(days=1)
+        d7  = now - timedelta(days=7)
+        d30 = now - timedelta(days=30)
 
-        auth_users, visitors = {}, {}
-        for key, since in windows.items():
-            auth_users[key] = (base.filter(viewed_at__gte=since, user__isnull=False)
-                               .values('user').distinct().count())
-            visitors[key]   = (base.filter(viewed_at__gte=since)
-                               .values('session_id').distinct().count())
+        # ⚡ 1 seule requête pour les 6 métriques (avant : 6 requêtes)
+        a = PageView.objects.filter(supplier=supplier, viewed_at__gte=d30).aggregate(
+            u_dau=Count('session_key', distinct=True, filter=Q(viewed_at__gte=d1)),
+            u_wau=Count('session_key', distinct=True, filter=Q(viewed_at__gte=d7)),
+            u_mau=Count('session_key', distinct=True),
+            a_dau=Count('user', distinct=True, filter=Q(viewed_at__gte=d1, user__isnull=False)),
+            a_wau=Count('user', distinct=True, filter=Q(viewed_at__gte=d7, user__isnull=False)),
+            a_mau=Count('user', distinct=True, filter=Q(user__isnull=False)),
+        )
+
+        visitors = {'dau': a['u_dau'] or 0, 'wau': a['u_wau'] or 0, 'mau': a['u_mau'] or 0}
+        auth_users = {'dau': a['a_dau'] or 0, 'wau': a['a_wau'] or 0, 'mau': a['a_mau'] or 0}
 
         return Response({
             'authenticated_users': auth_users,
@@ -167,7 +206,6 @@ class SupplierRegionStatsView(generics.GenericAPIView):
     def get(self, request):
         supplier = request.user.supplier_profile
 
-        # ⚠️ FIX : related_name réel = 'sub_orders' (avant : 'suborders')
         rows = (
             OrderRegion.objects
             .filter(order__sub_orders__supplier=supplier)
@@ -182,8 +220,8 @@ class SupplierRegionStatsView(generics.GenericAPIView):
 
         labels = dict(OrderRegion._meta.get_field('gouvernorat').choices)
         data = [{
-            'gouvernorat': r['gouvernorat'],
-            'label':       labels.get(r['gouvernorat'], r['gouvernorat']),
+            'gouvernorat':  r['gouvernorat'],
+            'label':        labels.get(r['gouvernorat'], r['gouvernorat']),
             'orders_count': r['orders_count'],
             'revenue':      float(r['revenue'] or 0),
         } for r in rows]
@@ -231,12 +269,12 @@ class CurrentMonthTargetView(generics.GenericAPIView):
             supplier=supplier, year=now.year, month=now.month
         ).first()
 
-        achieved_qs = SubOrder.objects.filter(
+        a = SubOrder.objects.filter(
             supplier=supplier, created_at__gte=start
-        ).exclude(status='cancelled')
+        ).exclude(status='cancelled').aggregate(rev=Sum('subtotal_tnd'), n=Count('id'))
 
-        achieved_revenue = float(achieved_qs.aggregate(s=Sum('subtotal_tnd'))['s'] or 0)
-        achieved_orders  = achieved_qs.count()
+        achieved_revenue = float(a['rev'] or 0)
+        achieved_orders  = a['n'] or 0
 
         target_revenue = float(target.revenue_target) if target else 0
         pct = round(achieved_revenue / target_revenue * 100, 1) if target_revenue else 0

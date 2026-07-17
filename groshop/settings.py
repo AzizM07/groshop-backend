@@ -62,7 +62,8 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-
+if DEBUG:
+    MIDDLEWARE += ['groshop.perf.QueryCountMiddleware']
 ROOT_URLCONF = 'groshop.urls'
 
 TEMPLATES = [
@@ -219,21 +220,32 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 USE_S3 = config('USE_S3', default=False, cast=bool)
 
 if USE_S3:
-    # Cloudflare R2 (compatible S3) — pour les images uploadées
-    AWS_ACCESS_KEY_ID     = config('R2_ACCESS_KEY_ID')
-    AWS_SECRET_ACCESS_KEY = config('R2_SECRET_ACCESS_KEY')
+    AWS_ACCESS_KEY_ID       = config('R2_ACCESS_KEY_ID')
+    AWS_SECRET_ACCESS_KEY   = config('R2_SECRET_ACCESS_KEY')
     AWS_STORAGE_BUCKET_NAME = config('R2_BUCKET_NAME')
-    AWS_S3_ENDPOINT_URL   = config('R2_ENDPOINT_URL')     # ex: https://xxx.r2.cloudflarestorage.com
-    AWS_S3_CUSTOM_DOMAIN  = config('R2_CUSTOM_DOMAIN', default='')  # ex: cdn.groshop.tn
+    AWS_S3_ENDPOINT_URL     = config('R2_ENDPOINT_URL')
+    AWS_S3_CUSTOM_DOMAIN    = config('R2_CUSTOM_DOMAIN', default='')
+
+    AWS_S3_REGION_NAME       = 'eu-central-1'   # ⭐ Supabase (Frankfurt)
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
+    AWS_S3_ADDRESSING_STYLE  = 'path'           # ⭐ Supabase exige le path-style
+    AWS_DEFAULT_ACL          = None
+    AWS_QUERYSTRING_AUTH     = False            # URLs publiques, sans signature
+    AWS_S3_FILE_OVERWRITE    = False
     AWS_S3_OBJECT_PARAMETERS = {'CacheControl': 'max-age=86400'}
-    AWS_DEFAULT_ACL = None
-    AWS_QUERYSTRING_AUTH = False
-    DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
-    MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/' if AWS_S3_CUSTOM_DOMAIN else f'{AWS_S3_ENDPOINT_URL}/{AWS_STORAGE_BUCKET_NAME}/'
+
+    STORAGES = {
+        'default':     {'BACKEND': 'storages.backends.s3boto3.S3Boto3Storage'},
+        'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+    }
+    MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/'
 else:
-    # Fallback local (dev)
-    MEDIA_URL   = '/media/'
-    MEDIA_ROOT  = BASE_DIR / 'media'
+    STORAGES = {
+        'default':     {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+    }
+    MEDIA_URL  = '/media/'
+    MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
