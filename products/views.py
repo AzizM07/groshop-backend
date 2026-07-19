@@ -6,12 +6,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import status
+from django.db.models import Avg, Count, F, Exists, OuterRef
 
 from django.db.models import Q
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 
-from .models import Category, Product, Review
+from .models import Category, Product, Review, ReviewPhoto, Favorite   # ← Favorite ajouté
 from .serializers import (
     CategorySerializer, ProductListSerializer,
     ProductDetailSerializer, ReviewSerializer,
@@ -221,7 +222,8 @@ def product_detail(request, pk):
             user=request.user, product=product, event_type='view',
         )
 
-    serializer = ProductDetailSerializer(product)
+    # ⭐ context={'request': request} → nécessaire pour is_favorited
+    serializer = ProductDetailSerializer(product, context={'request': request})
     return Response(serializer.data)
 
 
@@ -283,6 +285,108 @@ def product_reviews(request, pk):
     ).select_related('reviewer', 'variant').prefetch_related('photos').order_by('-created_at')
     serializer = ReviewSerializer(reviews, many=True)
     return Response(serializer.data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_review(request):
+    '''
+    POST /api/products/reviews/create/
+    body: { product_id, rating, comment?, order_id?, variant_id?, photos?[] }
+
+    Achat vérifié : l'acheteur doit avoir une commande LIVRÉE contenant
+    le produit. Un seul avis par (acheteur, produit) — contrainte DB.
+    '''
+    from .serializers import ReviewCreateSerializer  # évite les imports circulaires si besoin
+
+    s = ReviewCreateSerializer(data=request.data)
+    if not s.is_valid():
+        return Response(s.errors, status=400)
+    data = s.validated_data
+
+    try:
+        product = Product.objects.select_related('supplier').get(id=data['product_id'])
+    except Product.DoesNotExist:
+        return Response({'error': 'Produit non trouvé.'}, status=404)
+
+    # ── Achat vérifié : au moins un OrderItem livré pour ce produit ──
+    from orders.models import OrderItem
+    has_delivered = OrderItem.objects.filter(
+        product=product,
+        sub_order__status='delivered',
+        sub_order__order__buyer=request.user,
+    ).exists()
+    if not has_delivered:
+        return Response(
+            {'error': "Vous ne pouvez évaluer qu'un produit reçu."},
+            status=403
+        )
+
+    # ── Déjà évalué ? (la contrainte DB le bloquerait, on renvoie un message clair) ──
+    if Review.objects.filter(reviewer=request.user, product=product).exists():
+        return Response({'error': 'Vous avez déjà évalué ce produit.'}, status=409)
+
+    review = Review.objects.create(
+        reviewer   = request.user,
+        product    = product,
+        supplier   = product.supplier,
+        order_id   = data.get('order_id') or None,
+        variant_id = data.get('variant_id') or None,
+        rating     = data['rating'],
+        comment    = data.get('comment', ''),
+    )
+
+    for i, url in enumerate(data.get('photos', [])):
+        ReviewPhoto.objects.create(review=review, url=url, sort_order=i)
+
+    # ── Recalcule rating_avg / rating_count du produit (1 requête agrégée) ──
+    agg = Review.objects.filter(product=product).aggregate(
+        avg=Avg('rating'), n=Count('id')
+    )
+    product.rating_avg   = round(agg['avg'] or 0, 2)
+    product.rating_count = agg['n'] or 0
+    product.save(update_fields=['rating_avg', 'rating_count'])
+
+    return Response(ReviewSerializer(review).data, status=201)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  FAVORIS (acheteur)
+# ══════════════════════════════════════════════════════════════════
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def favorites(request):
+    """GET = liste des favoris · POST {product_id} = ajoute."""
+    if request.method == 'GET':
+        favs = (
+            Favorite.objects
+            .filter(user=request.user)
+            .select_related('product__supplier__store', 'product__category')
+            .prefetch_related('product__images', 'product__price_tiers')
+        )
+        products = [f.product for f in favs]
+        data = ProductListSerializer(products, many=True, context={'request': request}).data
+        return Response({'products': data, 'suppliers': []})
+
+    product_id = request.data.get('product_id')
+    if not product_id:
+        return Response({'error': 'product_id requis'}, status=400)
+
+    product = Product.objects.filter(id=product_id).first()
+    if not product:
+        return Response({'error': 'Produit non trouvé.'}, status=404)
+
+    Favorite.objects.get_or_create(user=request.user, product=product)
+    return Response({'ok': True, 'product_id': str(product_id)}, status=201)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def favorite_detail(request, product_id):
+    """DELETE = retire ce produit des favoris (idempotent)."""
+    Favorite.objects.filter(user=request.user, product_id=product_id).delete()
+    return Response(status=204)
 
 
 # ══════════════════════════════════════════════════════════════════

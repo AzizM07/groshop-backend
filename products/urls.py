@@ -10,12 +10,17 @@ urlpatterns = [
     path('recommended/',  views.recommended_products, name='recommended-products'),
     path('categories/',   views.categories_list,    name='categories-list'),
 
+    # ── Favoris acheteur (routes statiques AVANT <uuid:pk>) ──
+    path('favorites/',                   views.favorites,       name='favorites'),
+    path('favorites/<uuid:product_id>/', views.favorite_detail, name='favorite-detail'),
+
     # ── Espace fournisseur (routes statiques AVANT <uuid:pk>) ──
     path('create/',       views.create_product,       name='product-create'),
     path('upload-image/', views.upload_product_image, name='product-upload-image'),
     path('mine/',         views.my_products,          name='product-mine'),
 
     # ── Détail produit (UUID) — doit rester en dernier ──
+    path('reviews/create/', views.create_review, name='review-create'),
     path('<uuid:pk>/',                 views.product_detail,          name='product-detail'),
     path('<uuid:pk>/similar/',         views.similar_products,        name='similar-products'),
     path('<uuid:pk>/reviews/',         views.product_reviews,         name='product-reviews'),

@@ -159,7 +159,58 @@ def cancel_order(request, pk):
     order.status = 'cancelled'
     order.save()
     return Response({'message': 'Commande annulée.'})
-
+from django.db.models import Prefetch, Exists, OuterRef
+ 
+ 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def to_review(request):
+    '''
+    GET /api/orders/to-review/
+    Articles reçus (sub_order livré) que l'acheteur n'a pas encore notés.
+    Sert le compteur du dashboard + la liste "À évaluer".
+    '''
+    from products.models import Review
+ 
+    already = Review.objects.filter(
+        reviewer=request.user,
+        product=OuterRef('product'),
+    )
+ 
+    items = (OrderItem.objects
+             .filter(
+                 sub_order__order__buyer=request.user,
+                 sub_order__status='delivered',
+             )
+             .annotate(_reviewed=Exists(already))
+             .filter(_reviewed=False)
+             .select_related('product', 'sub_order', 'sub_order__order')
+             .prefetch_related('product__images')
+             .order_by('-sub_order__order__created_at'))
+ 
+    results = []
+    for it in items:
+        images = it.product.images.all()
+        image_url = None
+        for img in images:
+            if img.is_primary:
+                image_url = img.url
+                break
+        if image_url is None and images:
+            image_url = images[0].url
+ 
+        results.append({
+            'order_item_id': str(it.id),
+            'order_id':      str(it.sub_order.order_id),
+            'product_id':    str(it.product_id),
+            'product_name':  it.product.name,
+            'product_image': image_url,
+            'variant_id':    str(it.variant_id) if getattr(it, 'variant_id', None) else None,
+            'quantity':      it.quantity,
+            'delivered_at':  it.sub_order.updated_at,
+        })
+ 
+    return Response({'count': len(results), 'results': results})
 
 # ══════════════════════════════════════════════════════════════════
 # ORDERS — FOURNISSEUR

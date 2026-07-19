@@ -118,6 +118,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     price_tiers = ProductPriceTierSerializer(many=True, read_only=True)
     variants    = ProductVariantSerializer(many=True, read_only=True)
     specs       = serializers.SerializerMethodField()
+    is_favorited = serializers.SerializerMethodField()   # ← NOUVEAU (cœur wishlist)
 
     supplier_name         = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug         = serializers.CharField(source='supplier.slug', read_only=True)
@@ -150,6 +151,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'supplier_rating', 'supplier_rating_count',
             'supplier_city', 'supplier_wilaya', 'supplier_verified',
             'category_name', 'category_slug',
+            'is_favorited',                                  # ← NOUVEAU
         ]
 
     def get_specs(self, obj):
@@ -166,6 +168,13 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             if key and value:
                 result.append({'k': key, 'v': value})
         return result
+
+    def get_is_favorited(self, obj):
+        """True si l'utilisateur connecté a ce produit en favori."""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.favorited_by.filter(user=request.user).exists()
 
 
 # ── Review ────────────────────────────────────────────────────────
@@ -187,7 +196,15 @@ class ReviewSerializer(serializers.ModelSerializer):
         model  = Review
         fields = ['id', 'reviewer_name', 'rating', 'comment', 'created_at', 'variant_name', 'photos']
 
-
+class ReviewCreateSerializer(serializers.Serializer):
+    product_id = serializers.UUIDField()
+    rating     = serializers.IntegerField(min_value=1, max_value=5)
+    comment    = serializers.CharField(required=False, allow_blank=True, default='')
+    order_id   = serializers.UUIDField(required=False, allow_null=True)
+    variant_id = serializers.UUIDField(required=False, allow_null=True)
+    photos     = serializers.ListField(
+        child=serializers.URLField(), required=False, default=list
+    )
 # ══════════════════════════════════════════════════════════════════
 #  ÉCRITURE (création produit fournisseur)
 # ══════════════════════════════════════════════════════════════════

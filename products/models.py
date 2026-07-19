@@ -184,3 +184,28 @@ class ReviewPhoto(models.Model):
 
     def __str__(self):
         return f'Photo {self.sort_order} → avis {self.review_id}'
+
+
+# ── Favorite (NOUVEAU) ─────────────────────────────────────────────
+class Favorite(models.Model):
+    """
+    Produit mis en favori par un acheteur (wishlist).
+    user = côté « client », product = côté « produit ».
+    """
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user       = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='favorites')
+    product    = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='favorited_by')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'favorites'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'product'], name='unique_favorite_user_product'),
+        ]
+        indexes = [
+            models.Index(fields=['user', 'product']),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} ♥ {self.product_id}'

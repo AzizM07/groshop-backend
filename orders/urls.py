@@ -11,6 +11,7 @@ urlpatterns = [
     path('supplier/<uuid:pk>/',  views.supplier_suborder_update, name='supplier-suborder-update'),
 
     # ── Acheteur (UUID) ──
+    path('to-review/', views.to_review, name='orders-to-review'),
     path('<uuid:pk>/',        views.order_detail,  name='order-detail'),
     path('<uuid:pk>/cancel/', views.cancel_order,  name='cancel-order'),
 ]
