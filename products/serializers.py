@@ -4,7 +4,7 @@ import uuid as _uuid
 
 from .models import (
     Category, Product, ProductImage, ProductPriceTier,
-    ProductVariant, Review, ReviewPhoto,
+    ProductChoiceGroup, ProductVariant, Review, ReviewPhoto,
 )
 
 
@@ -64,6 +64,15 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'image_url', 'sort_order']
 
 
+# ── ProductChoiceGroup (NOUVEAU) ──────────────────────────────────
+class ProductChoiceGroupSerializer(serializers.ModelSerializer):
+
+    variants = ProductVariantSerializer(many=True, read_only=True)
+
+    class Meta:
+        model  = ProductChoiceGroup
+        fields = ['id', 'name', 'sort_order', 'variants']
+
 # ── Product List (carte) ──────────────────────────────────────────
 class ProductListSerializer(serializers.ModelSerializer):
 
@@ -110,13 +119,34 @@ class ProductListSerializer(serializers.ModelSerializer):
             return 0
         return round(float(rating))
 
+class CategorySerializer(serializers.ModelSerializer):
+    children = serializers.SerializerMethodField()
+    icon = serializers.SerializerMethodField()   # ← champ calculé pour le frontend
 
+    class Meta:
+        model = Category
+        fields = ['id', 'name', 'slug', 'icon', 'image_url', 'children', 'is_hot', 'is_new', 'sort_order']
+        # ← on ajoute explicitement 'image_url' pour les sous‑catégories
+
+    def get_children(self, obj):
+        children = obj.children.filter(is_active=True)
+        return CategorySerializer(children, many=True).data
+
+    def get_icon(self, obj):
+        """
+        Retourne l'URL de l'image si disponible, sinon le nom de l'icône.
+        Le frontend (CatIcon) saura les distinguer.
+        """
+        if obj.image_url:
+            return obj.image_url
+        return obj.icon_name or None
 # ── Product Detail (page produit) ─────────────────────────────────
 class ProductDetailSerializer(serializers.ModelSerializer):
 
     images      = ProductImageSerializer(many=True, read_only=True)
     price_tiers = ProductPriceTierSerializer(many=True, read_only=True)
     variants    = ProductVariantSerializer(many=True, read_only=True)
+    choice_groups = ProductChoiceGroupSerializer(many=True, read_only=True) 
     specs       = serializers.SerializerMethodField()
     is_favorited = serializers.SerializerMethodField()   # ← NOUVEAU (cœur wishlist)
 
@@ -146,7 +176,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'created_at',
             'brand', 'reference', 'pack_size',
             'shipping_price_tnd', 'delivery_days',
-            'images', 'price_tiers', 'variants', 'specs',
+            'images', 'price_tiers', 'variants', 'choice_groups', 'specs',
             'supplier_name', 'supplier_slug', 'supplier_logo', 'supplier_banner',
             'supplier_rating', 'supplier_rating_count',
             'supplier_city', 'supplier_wilaya', 'supplier_verified',
@@ -214,23 +244,28 @@ class _TierWrite(serializers.ModelSerializer):
         model  = ProductPriceTier
         fields = ['min_qty', 'max_qty', 'price_tnd']
 
-
+class _ImageWrite(serializers.ModelSerializer):
+    class Meta:
+        model  = ProductImage
+        fields = ['url', 'is_primary', 'sort_order']
 class _VariantWrite(serializers.ModelSerializer):
     class Meta:
         model  = ProductVariant
         fields = ['name', 'image_url', 'sort_order']
 
 
-class _ImageWrite(serializers.ModelSerializer):
+class _ChoiceGroupWrite(serializers.ModelSerializer):
+    variants = _VariantWrite(many=True, required=False)
+
     class Meta:
-        model  = ProductImage
-        fields = ['url', 'is_primary', 'sort_order']
+        model  = ProductChoiceGroup
+        fields = ['name', 'sort_order', 'variants']
 
 
 class ProductCreateSerializer(serializers.ModelSerializer):
-    images      = _ImageWrite(many=True, required=False)
-    price_tiers = _TierWrite(many=True, required=False)
-    variants    = _VariantWrite(many=True, required=False)
+    images        = _ImageWrite(many=True, required=False)
+    price_tiers   = _TierWrite(many=True, required=False)
+    choice_groups = _ChoiceGroupWrite(many=True, required=False)
 
     class Meta:
         model  = Product
@@ -239,14 +274,18 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             'moq', 'base_price_tnd', 'old_price_tnd', 'video_url',
             'stock_qty', 'brand', 'reference', 'pack_size', 'specs_raw',
             'shipping_price_tnd', 'delivery_days', 'is_free_shipping',
-            'status', 'images', 'price_tiers', 'variants',
+            'status', 'images', 'price_tiers', 'choice_groups',
         ]
         read_only_fields = ['id']
 
     def validate_status(self, value):
-        # Un fournisseur ne peut créer qu'en brouillon ou soumettre pour validation
         if value not in ('draft', 'pending_review'):
             raise serializers.ValidationError("Statut non autorisé.")
+        return value
+
+    def validate_choice_groups(self, value):
+        if len(value) > 5:
+            raise serializers.ValidationError("Maximum 5 groupes de choix par produit.")
         return value
 
     def _unique_slug(self, name):
@@ -257,22 +296,31 @@ class ProductCreateSerializer(serializers.ModelSerializer):
         return slug
 
     def create(self, validated_data):
-        images   = validated_data.pop('images', [])
-        tiers    = validated_data.pop('price_tiers', [])
-        variants = validated_data.pop('variants', [])
+        images = validated_data.pop('images', [])
+        tiers  = validated_data.pop('price_tiers', [])
+        groups = validated_data.pop('choice_groups', [])
 
         validated_data['supplier'] = self.context['request'].user.supplier_profile
         validated_data['slug']     = self._unique_slug(validated_data['name'])
         product = Product.objects.create(**validated_data)
 
-        # garantit une image primaire
         if images and not any(i.get('is_primary') for i in images):
             images[0]['is_primary'] = True
 
         ProductImage.objects.bulk_create([ProductImage(product=product, **i) for i in images])
         ProductPriceTier.objects.bulk_create([ProductPriceTier(product=product, **t) for t in tiers])
-        ProductVariant.objects.bulk_create([ProductVariant(product=product, **v) for v in variants])
+
+        for gi, g in enumerate(groups):
+            variants = g.pop('variants', [])
+            group = ProductChoiceGroup.objects.create(
+                product=product, name=g['name'], sort_order=g.get('sort_order', gi),
+            )
+            ProductVariant.objects.bulk_create([
+                ProductVariant(product=product, group=group, **v) for v in variants
+            ])
+
         return product
+
 
 
 # ── Liste fournisseur (page "Mes produits") ───────────────────────

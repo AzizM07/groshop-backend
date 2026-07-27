@@ -118,16 +118,39 @@ class ProductPriceTier(models.Model):
         return f'{self.product.name} | {self.min_qty}-{self.max_qty} → {self.price_tnd} TND'
 
 
-# ── ProductVariant (NOUVEAU) ──────────────────────────────────────
+# ── ProductChoiceGroup (NOUVEAU) ──────────────────────────────────
+class ProductChoiceGroup(models.Model):
+    """
+    Groupe de choix nommé par le fournisseur : "Couleur", "Taille", "Modèle"…
+    Maximum 5 par produit (validé côté serializer).
+    Chaque groupe contient un nombre illimité de ProductVariant.
+    """
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product    = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='choice_groups')
+    name       = models.CharField(max_length=50)   # ex: "Couleur", "Taille"
+    sort_order = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'product_choice_groups'
+        ordering = ['sort_order']
+
+    def __str__(self):
+        return f'{self.product.name} — {self.name}'
+
+
+# ── ProductVariant ────────────────────────────────────────────────
 class ProductVariant(models.Model):
     """
-    Variante simple d'un produit : juste un label + image optionnelle.
-    Même prix/stock que le produit parent (pas de gestion individuelle
-    par variante pour l'instant — phase 2 si besoin).
+    Une option à l'intérieur d'un groupe de choix.
+    ex: groupe "Couleur" → variantes "Rose", "Noir", "Blanc".
     """
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product     = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
-    name        = models.CharField(max_length=50)   # ex: "Silver", "Noir", "M", "XL"
+    group       = models.ForeignKey(
+        ProductChoiceGroup, on_delete=models.CASCADE,
+        related_name='variants', null=True, blank=True,   # null = anciennes variantes
+    )
+    name        = models.CharField(max_length=50)   # ex: "Rose", "XL"
     image_url   = models.TextField(blank=True)
     sort_order  = models.IntegerField(default=0)
 
@@ -137,7 +160,6 @@ class ProductVariant(models.Model):
 
     def __str__(self):
         return f'{self.product.name} — {self.name}'
-
 
 # ── Review ────────────────────────────────────────────────────────
 class Review(models.Model):

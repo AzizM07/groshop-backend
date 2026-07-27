@@ -54,13 +54,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         return f'{self.full_name} ({self.email})'
 
     last_seen = models.DateTimeField(null=True, blank=True)
-    
+
     @property
     def is_online(self):
         from django.utils import timezone
         if not self.last_seen:
             return False
         return (timezone.now() - self.last_seen).total_seconds() < 120  # 2 min
+
+
 # ── BuyerProfile ──────────────────────────────────────────────────
 class BuyerProfile(models.Model):
 
@@ -116,6 +118,12 @@ class SupplierProfile(models.Model):
     followers_count     = models.IntegerField(default=0)
     created_at          = models.DateTimeField(auto_now_add=True)
 
+    # ── Documents de vérification (URLs Supabase) ──
+    doc_rne  = models.TextField(blank=True, default='')
+    doc_cin  = models.TextField(blank=True, default='')
+    doc_rib  = models.TextField(blank=True, default='')
+    doc_logo = models.TextField(blank=True, default='')
+
     class Meta:
         db_table = 'supplier_profiles'
 
@@ -129,16 +137,11 @@ class SupplierStore(models.Model):
     id                = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     supplier          = models.OneToOneField(SupplierProfile, on_delete=models.CASCADE, related_name='store')
 
-    # ── Visuels ──
     logo_url          = models.TextField(blank=True)
     banner_url        = models.TextField(blank=True)
-
-    # ── Infos publiques ──
     description       = models.TextField(blank=True)
     founded_year      = models.IntegerField(null=True, blank=True)
     certifications    = models.TextField(blank=True)
-
-    # ── Stats ──
     page_views        = models.IntegerField(default=0)
     response_rate     = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     response_time_hrs = models.IntegerField(null=True, blank=True)
@@ -151,3 +154,51 @@ class SupplierStore(models.Model):
 
     def __str__(self):
         return f'Store: {self.supplier.company_name}'
+
+
+# ══════════════════════════════════════════════════════════════════
+# ADDRESS — carnet d'adresses acheteur
+# ══════════════════════════════════════════════════════════════════
+class Address(models.Model):
+    """Adresse de livraison sauvegardée par un acheteur.
+
+    - FK simple vers User (la restriction buyer se fait au niveau permission).
+    - is_default garantit une seule adresse par défaut par user (transaction dans la vue).
+    - formatted() sert de snapshot texte pour Order.shipping_address.
+    """
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user         = models.ForeignKey(User, on_delete=models.CASCADE, related_name='addresses')
+
+    # Destinataire
+    full_name    = models.CharField(max_length=150)
+    phone        = models.CharField(max_length=20)
+
+    # Localisation
+    country      = models.CharField(max_length=2, default='TN')   # code ISO
+    region       = models.CharField(max_length=100)               # gouvernorat
+    city         = models.CharField(max_length=100)
+    postal_code  = models.CharField(max_length=20)
+    street       = models.CharField(max_length=255)
+    additional   = models.CharField(max_length=255, blank=True)   # apt, étage, bâtiment
+
+    is_default   = models.BooleanField(default=False)
+    created_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'addresses'
+        ordering = ['-is_default', '-updated_at']
+
+    def __str__(self):
+        return f'{self.full_name} — {self.city}, {self.region}'
+
+    def formatted(self):
+        """Ligne unique pour affichage / snapshot commande."""
+        parts = [self.full_name, self.street]
+        if self.additional:
+            parts.append(self.additional)
+        parts.append(f'{self.city}, {self.region}')
+        parts.append(self.postal_code)
+        parts.append(self.country)
+        return ', '.join(p for p in parts if p)

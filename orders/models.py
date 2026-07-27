@@ -1,7 +1,7 @@
 # orders/models.py
 from django.db import models
 import uuid
-from users.models import User, SupplierProfile
+from users.models import User, SupplierProfile, Address
 from products.models import Product, ProductVariant
 
 
@@ -40,7 +40,20 @@ class Order(models.Model):
     payment_method   = models.CharField(max_length=20, choices=PAYMENT_METHODS, blank=True)
     total_tnd        = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     discount_tnd     = models.DecimalField(max_digits=10, decimal_places=3, default=0)
-    shipping_address = models.TextField()
+
+    # ── Adresse ──
+    # shipping_address : snapshot texte figé au moment de la commande.
+    #                    Reste lisible même si l'utilisateur supprime son adresse.
+    # shipping_address_ref : FK optionnel vers l'adresse d'origine.
+    #                        SET_NULL → si l'user supprime son adresse, on garde le snapshot.
+    shipping_address     = models.TextField()
+    shipping_address_ref = models.ForeignKey(
+        Address,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='orders',
+    )
+
     notes            = models.TextField(blank=True)
     created_at       = models.DateTimeField(auto_now_add=True)
     updated_at       = models.DateTimeField(auto_now=True)
@@ -133,7 +146,7 @@ class CartItem(models.Model):
 
     class Meta:
         db_table        = 'cart_items'
-        ordering        = ['-created_at']   # ← avant: '-updated_at'
+        ordering        = ['-created_at']
         unique_together = ('buyer', 'product', 'variant')
 
     def __str__(self):
@@ -141,7 +154,6 @@ class CartItem(models.Model):
 
     @property
     def unit_price(self):
-        """Prix unitaire selon les paliers de prix (price_tiers)."""
         tier = self.product.price_tiers.filter(
             min_qty__lte=self.quantity
         ).order_by('-min_qty').first()

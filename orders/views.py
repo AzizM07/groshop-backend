@@ -5,11 +5,12 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from django.db import transaction
-from django.db.models import Count, F, Prefetch
+from django.db.models import Count, F, Prefetch, Exists, OuterRef
 from django.shortcuts import get_object_or_404
 
 from analytics.tracking import attribute_order
 from products.models import Product
+from users.models import Address
 
 from .models import Order, SubOrder, OrderItem, CartItem
 from .serializers import (
@@ -18,8 +19,7 @@ from .serializers import (
 )
 
 
-# ── Prefetch réutilisable : items + produit + catégorie + images ───
-# select_related dans le Prefetch → produit & catégorie ramenés en 1 requête (JOIN)
+# ── Prefetch réutilisable ─────────────────────────────────────────
 ITEMS_PREFETCH = Prefetch(
     'items',
     queryset=OrderItem.objects
@@ -36,7 +36,7 @@ ITEMS_PREFETCH = Prefetch(
 def orders_list(request):
     orders = (Order.objects
               .filter(buyer=request.user)
-              .prefetch_related('sub_orders')     # ⚡ pour get_sub_orders_count
+              .prefetch_related('sub_orders')
               .order_by('-created_at'))
     serializer = OrderListSerializer(orders, many=True)
     return Response(serializer.data)
@@ -69,14 +69,36 @@ def create_order(request):
     if not items:
         return Response({'error': 'Aucun produit dans la commande.'}, status=400)
 
+    # ── Résolution de l'adresse ──
+    # Priorité : address_id (l'user a sélectionné une adresse sauvegardée)
+    #            → snapshot texte via formatted() + FK vers l'Address
+    # Fallback  : shipping_address texte brut (invités, ou legacy)
+    address_ref = None
+    address_snapshot = data.get('shipping_address', '')
+
+    address_id = data.get('address_id')
+    if address_id:
+        try:
+            address_ref = Address.objects.get(id=address_id, user=request.user)
+        except Address.DoesNotExist:
+            return Response(
+                {'error': "Adresse introuvable ou n'appartenant pas à cet utilisateur."},
+                status=400,
+            )
+        address_snapshot = address_ref.formatted()
+
+    if not address_snapshot:
+        return Response({'error': 'Adresse de livraison manquante.'}, status=400)
+
     with transaction.atomic():
         order = Order.objects.create(
-            buyer            = request.user,
-            shipping_address = data['shipping_address'],
-            payment_method   = data['payment_method'],
-            notes            = data.get('notes', ''),
-            status           = 'pending',
-            payment_status   = 'unpaid',
+            buyer                = request.user,
+            shipping_address     = address_snapshot,
+            shipping_address_ref = address_ref,
+            payment_method       = data['payment_method'],
+            notes                = data.get('notes', ''),
+            status               = 'pending',
+            payment_status       = 'unpaid',
         )
 
         total_order     = 0
@@ -133,14 +155,12 @@ def create_order(request):
                     unit_price_tnd = item['unit_price'],
                     total_tnd      = item['total'],
                 )
-                # F() : incrément côté base → pas de perte si commandes simultanées
                 Product.objects.filter(id=item['product'].id).update(
                     sold_count=F('sold_count') + item['quantity'])
 
         order.total_tnd = total_order
         order.save()
 
-        # ── Attribution analytics : canal + région + session convertie ──
         attribute_order(order, request)
 
     return Response(
@@ -159,24 +179,18 @@ def cancel_order(request, pk):
     order.status = 'cancelled'
     order.save()
     return Response({'message': 'Commande annulée.'})
-from django.db.models import Prefetch, Exists, OuterRef
- 
- 
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def to_review(request):
-    '''
-    GET /api/orders/to-review/
-    Articles reçus (sub_order livré) que l'acheteur n'a pas encore notés.
-    Sert le compteur du dashboard + la liste "À évaluer".
-    '''
     from products.models import Review
- 
+
     already = Review.objects.filter(
         reviewer=request.user,
         product=OuterRef('product'),
     )
- 
+
     items = (OrderItem.objects
              .filter(
                  sub_order__order__buyer=request.user,
@@ -187,7 +201,7 @@ def to_review(request):
              .select_related('product', 'sub_order', 'sub_order__order')
              .prefetch_related('product__images')
              .order_by('-sub_order__order__created_at'))
- 
+
     results = []
     for it in items:
         images = it.product.images.all()
@@ -198,7 +212,7 @@ def to_review(request):
                 break
         if image_url is None and images:
             image_url = images[0].url
- 
+
         results.append({
             'order_item_id': str(it.id),
             'order_id':      str(it.sub_order.order_id),
@@ -209,8 +223,9 @@ def to_review(request):
             'quantity':      it.quantity,
             'delivered_at':  it.sub_order.updated_at,
         })
- 
+
     return Response({'count': len(results), 'results': results})
+
 
 # ══════════════════════════════════════════════════════════════════
 # ORDERS — FOURNISSEUR
@@ -232,7 +247,6 @@ def supplier_orders(request):
     if st and st != 'all':
         qs = qs.filter(status=st)
 
-    # ⚡ 1 requête pour tous les compteurs (avant : 2)
     rows = SubOrder.objects.filter(supplier=supplier).values('status').annotate(c=Count('id'))
     counts = {r['status']: r['c'] for r in rows}
     counts['all'] = sum(counts.values())
@@ -264,23 +278,17 @@ def supplier_suborder_update(request, pk):
 
 
 # ══════════════════════════════════════════════════════════════════
-# CART
+# CART (inchangé)
 # ══════════════════════════════════════════════════════════════════
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def cart_view(request):
-    """
-    GET  /api/cart/      → liste les items du panier
-    POST /api/cart/      → ajoute un item (ou met à jour la qty si déjà présent)
-                            body: { product_id, quantity, variant_id? }
-    """
     if request.method == 'GET':
         items = CartItem.objects.filter(buyer=request.user).select_related(
             'product', 'product__supplier', 'variant',
         ).prefetch_related('product__images', 'product__price_tiers')
         return Response(CartItemSerializer(items, many=True).data)
 
-    # POST → add or update
     product_id = request.data.get('product_id')
     quantity   = request.data.get('quantity', 1)
     variant_id = request.data.get('variant_id') or None
@@ -316,10 +324,6 @@ def cart_view(request):
 @api_view(['PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def cart_item_view(request, pk):
-    """
-    PATCH  /api/cart/<id>/   → modifie la qty
-    DELETE /api/cart/<id>/   → supprime l'item
-    """
     item = get_object_or_404(
         CartItem.objects.select_related('product', 'product__supplier', 'variant')
                         .prefetch_related('product__images', 'product__price_tiers'),
@@ -330,7 +334,6 @@ def cart_item_view(request, pk):
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    # PATCH
     quantity = request.data.get('quantity')
     if quantity is not None:
         try:
@@ -349,7 +352,6 @@ def cart_item_view(request, pk):
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
 def cart_clear(request):
-    """DELETE /api/cart/clear/ → vide le panier."""
     CartItem.objects.filter(buyer=request.user).delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -357,6 +359,5 @@ def cart_clear(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def cart_count(request):
-    """GET /api/cart/count/ → nombre d'items pour badge nav."""
     count = CartItem.objects.filter(buyer=request.user).count()
     return Response({'count': count})

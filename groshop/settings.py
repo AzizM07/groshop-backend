@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'gamification',
     'store',
     'analytics',
+    'banners',
 ]
 
 

@@ -1,5 +1,8 @@
-from rest_framework.decorators import api_view, permission_classes, throttle_classes
+import os
+import uuid
+from rest_framework.decorators import api_view, permission_classes, throttle_classes, parser_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
@@ -7,17 +10,23 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from django.conf import settings
 from django.contrib.auth import authenticate
-from .serializers import RegisterBuyerSerializer, RegisterSupplierSerializer, UserSerializer, SupplierPublicSerializer
-from .models import User, SupplierProfile, SupplierStore
+from django.utils.text import slugify
+from django.db import transaction, IntegrityError
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from .serializers import (
+    RegisterBuyerSerializer, RegisterSupplierSerializer, UserSerializer,
+    SupplierPublicSerializer, AddressSerializer,
+)
+from .models import User, SupplierProfile, SupplierStore, Address
 from decouple import config
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
 GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID')
 
-ACCESS_MAX_AGE  = 15 * 60           # 15 min
-REFRESH_MAX_AGE = 7 * 24 * 60 * 60  # 7 jours
-
+ACCESS_MAX_AGE  = 15 * 60
+REFRESH_MAX_AGE = 7 * 24 * 60 * 60
 REFRESH_PATH = '/api/auth/refresh/'
 
 # ═══════════════════════════════════════════════════════════════════
@@ -215,7 +224,7 @@ def supplier_products(request, slug):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# GOOGLE ONE TAP — instrumenté pour diagnostiquer le 401
+# GOOGLE ONE TAP
 # ═══════════════════════════════════════════════════════════════════
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -237,7 +246,6 @@ def google_one_tap(request):
         )
         print("🟢 Token vérifié — audience OK, aud =", idinfo.get('aud'))
     except ValueError as e:
-        # ⬇️ LA cause exacte du 401 s'affiche ici
         print("🔴 GOOGLE VERIFY FAILED:", repr(e))
         return Response(
             {'error': 'Token Google invalide.', 'detail': str(e)},
@@ -268,12 +276,11 @@ def google_one_tap(request):
             full_name=full_name or email.split('@')[0],
             role='buyer',
             is_active=True,
-            is_verified=True,   # email déjà vérifié par Google
+            is_verified=True,
         )
         user.set_unusable_password()
         user.save()
 
-        # Crée le profil acheteur associé si le modèle existe
         try:
             from .models import BuyerProfile
             BuyerProfile.objects.get_or_create(user=user)
@@ -309,3 +316,223 @@ def supplier_me(request):
         return Response({'error': 'Profil fournisseur non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
 
     return Response(SupplierPublicSerializer(supplier).data)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  INSCRIPTION FOURNISSEUR
+# ══════════════════════════════════════════════════════════════════
+class SignupThrottle(ScopedRateThrottle):
+    scope = 'login'
+
+
+def _unique_supplier_slug(base):
+    base = slugify(base) or 'fournisseur'
+    slug, i = base, 1
+    while SupplierProfile.objects.filter(slug=slug).exists():
+        i += 1
+        slug = f'{base}-{i}'
+    return slug
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([SignupThrottle])
+def supplier_signup(request):
+    d = request.data
+    email        = (d.get('email') or '').strip().lower()
+    password     = d.get('password') or ''
+    full_name    = (d.get('full_name') or '').strip()
+    company_name = (d.get('company_name') or '').strip()
+
+    if not (email and password and full_name and company_name):
+        return Response({'error': 'Champs obligatoires manquants.'}, status=400)
+    if len(password) < 6:
+        return Response({'error': 'Mot de passe : 6 caractères minimum.'}, status=400)
+    if User.objects.filter(email=email).exists():
+        return Response({'error': 'Un compte existe déjà avec cet email.'}, status=409)
+
+    try:
+        with transaction.atomic():
+            user = User.objects.create_user(
+                email=email,
+                password=password,
+                full_name=full_name,
+                phone=(d.get('phone') or '').strip(),
+                role='supplier',
+            )
+            SupplierProfile.objects.create(
+                user=user,
+                company_name=company_name,
+                slug=_unique_supplier_slug(company_name),
+                tax_number=(d.get('tax_number') or '').strip(),
+                rc_number=(d.get('rc_number') or '').strip(),
+                address=(d.get('address') or '').strip(),
+                city=(d.get('city') or '').strip(),
+                wilaya=(d.get('wilaya') or '').strip(),
+                doc_rne=d.get('doc_rne', ''),
+                doc_cin=d.get('doc_cin', ''),
+                doc_rib=d.get('doc_rib', ''),
+                doc_logo=d.get('doc_logo', ''),
+                verification_status='pending',
+            )
+    except IntegrityError:
+        return Response({'error': 'Conflit lors de la création du compte.'}, status=409)
+
+    return Response(
+        {'message': 'Compte fournisseur créé. En attente de validation par un administrateur.'},
+        status=201,
+    )
+
+
+# ── Upload document ───────────────────────────────────────────────
+ALLOWED_DOC_EXT = {'.pdf', '.jpg', '.jpeg', '.png', '.svg'}
+ALLOWED_DOC_CONTENT_TYPES = {
+    'application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/svg+xml',
+}
+MAX_DOC_SIZE_MB = 5
+
+
+class DocUploadThrottle(ScopedRateThrottle):
+    scope = 'login'
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+@throttle_classes([DocUploadThrottle])
+@parser_classes([MultiPartParser, FormParser])
+def upload_document(request):
+    f = request.FILES.get('file')
+    if not f:
+        return Response({'error': 'Aucun fichier.'}, status=400)
+
+    ext = os.path.splitext(f.name)[1].lower()
+    if ext not in ALLOWED_DOC_EXT or f.content_type not in ALLOWED_DOC_CONTENT_TYPES:
+        return Response({'error': 'Format non supporté (pdf, png, jpg, jpeg, svg).'}, status=400)
+    if f.size > MAX_DOC_SIZE_MB * 1024 * 1024:
+        return Response({'error': f'Fichier trop volumineux (max {MAX_DOC_SIZE_MB} Mo).'}, status=400)
+
+    key  = f"suppliers/{uuid.uuid4().hex}{ext}"
+    path = default_storage.save(key, ContentFile(f.read()))
+    url  = default_storage.url(path)
+    if url.startswith('/'):
+        url = request.build_absolute_uri(url)
+    return Response({'url': url}, status=201)
+
+
+# ══════════════════════════════════════════════════════════════════
+# ADDRESS — CRUD carnet d'adresses buyer
+# ══════════════════════════════════════════════════════════════════
+def _ensure_buyer(user):
+    """Retourne une Response 403 si user n'est pas buyer, sinon None."""
+    if user.role != 'buyer':
+        return Response({'error': 'Accès réservé aux acheteurs.'}, status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def addresses_list(request):
+    """
+    GET  /api/users/addresses/  → liste des adresses du buyer
+    POST /api/users/addresses/  → créer une adresse
+    """
+    err = _ensure_buyer(request.user)
+    if err:
+        return err
+
+    if request.method == 'GET':
+        qs = Address.objects.filter(user=request.user)
+        return Response(AddressSerializer(qs, many=True).data)
+
+    # POST
+    ser = AddressSerializer(data=request.data)
+    if not ser.is_valid():
+        return Response(ser.errors, status=400)
+
+    with transaction.atomic():
+        # Première adresse → force default. Sinon respecte is_default demandé.
+        is_first    = not Address.objects.filter(user=request.user).exists()
+        wants_default = ser.validated_data.get('is_default', False)
+        will_default  = is_first or wants_default
+
+        if will_default:
+            Address.objects.filter(user=request.user, is_default=True).update(is_default=False)
+
+        # save avec l'user et le flag final
+        ser.validated_data['is_default'] = will_default
+        addr = ser.save(user=request.user)
+
+    return Response(AddressSerializer(addr).data, status=201)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def address_detail(request, pk):
+    """
+    GET    /api/users/addresses/<id>/
+    PATCH  /api/users/addresses/<id>/
+    DELETE /api/users/addresses/<id>/
+    """
+    err = _ensure_buyer(request.user)
+    if err:
+        return err
+
+    try:
+        addr = Address.objects.get(id=pk, user=request.user)
+    except Address.DoesNotExist:
+        return Response({'error': 'Adresse non trouvée.'}, status=404)
+
+    if request.method == 'GET':
+        return Response(AddressSerializer(addr).data)
+
+    if request.method == 'DELETE':
+        was_default = addr.is_default
+        addr.delete()
+        # Si on supprime la default → promouvoir la plus récente restante
+        if was_default:
+            next_addr = Address.objects.filter(user=request.user).first()
+            if next_addr:
+                next_addr.is_default = True
+                next_addr.save(update_fields=['is_default'])
+        return Response(status=204)
+
+    # PATCH
+    ser = AddressSerializer(addr, data=request.data, partial=True)
+    if not ser.is_valid():
+        return Response(ser.errors, status=400)
+
+    with transaction.atomic():
+        new_default = ser.validated_data.get('is_default', addr.is_default)
+        if new_default and not addr.is_default:
+            Address.objects.filter(user=request.user, is_default=True) \
+                           .exclude(id=addr.id) \
+                           .update(is_default=False)
+        ser.save()
+
+    return Response(AddressSerializer(addr).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def address_set_default(request, pk):
+    """
+    POST /api/users/addresses/<id>/default/
+    Marque cette adresse comme par défaut, retire le flag des autres.
+    """
+    err = _ensure_buyer(request.user)
+    if err:
+        return err
+
+    try:
+        addr = Address.objects.get(id=pk, user=request.user)
+    except Address.DoesNotExist:
+        return Response({'error': 'Adresse non trouvée.'}, status=404)
+
+    with transaction.atomic():
+        Address.objects.filter(user=request.user, is_default=True) \
+                       .exclude(id=addr.id) \
+                       .update(is_default=False)
+        addr.is_default = True
+        addr.save(update_fields=['is_default'])
+
+    return Response(AddressSerializer(addr).data)

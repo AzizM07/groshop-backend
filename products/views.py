@@ -209,7 +209,7 @@ def product_detail(request, pk):
         product = Product.objects.select_related(
             'supplier', 'supplier__store', 'category'
         ).prefetch_related(
-            'images', 'price_tiers', 'variants'
+            'images', 'price_tiers', 'variants', 'choice_groups__variants'
         ).get(id=pk, status='approved')
     except Product.DoesNotExist:
         return Response({'error': 'Produit non trouvé.'}, status=status.HTTP_404_NOT_FOUND)

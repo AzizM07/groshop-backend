@@ -20,8 +20,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
                   'quantity', 'unit_price_tnd', 'total_tnd']
 
     def get_product_image(self, obj):
-        # ⚡ .all() → utilise le cache du prefetch (0 requête).
-        #    .filter() relancerait une requête SQL par article → N+1.
         images = obj.product.images.all()
         for img in images:
             if img.is_primary:
@@ -57,32 +55,48 @@ class OrderListSerializer(serializers.ModelSerializer):
                   'total_tnd', 'discount_tnd', 'created_at', 'sub_orders_count']
 
     def get_sub_orders_count(self, obj):
-        return len(obj.sub_orders.all())   # ⚡ cache prefetch (voir orders_list)
+        return len(obj.sub_orders.all())
 
 
 class OrderDetailSerializer(serializers.ModelSerializer):
 
-    sub_orders = SubOrderSerializer(many=True, read_only=True)
+    sub_orders           = SubOrderSerializer(many=True, read_only=True)
+    shipping_address_id  = serializers.UUIDField(source='shipping_address_ref_id',
+                                                 read_only=True, allow_null=True)
 
     class Meta:
         model  = Order
         fields = ['id', 'status', 'payment_status', 'payment_method',
-                  'total_tnd', 'discount_tnd', 'shipping_address',
+                  'total_tnd', 'discount_tnd',
+                  'shipping_address', 'shipping_address_id',
                   'notes', 'created_at', 'sub_orders']
 
 
 class CreateOrderSerializer(serializers.Serializer):
-
-    shipping_address = serializers.CharField()
+    """
+    Deux façons de passer l'adresse :
+      1. address_id  → on charge l'Address du buyer, on stocke la ref + snapshot texte.
+      2. shipping_address (texte) → fallback historique (rétro-compat).
+    Au moins l'un des deux doit être fourni.
+    """
+    address_id       = serializers.UUIDField(required=False)
+    shipping_address = serializers.CharField(required=False, allow_blank=True)
     payment_method   = serializers.ChoiceField(choices=[
         'cod', 'd17', 'flouci', 'sobflous', 'virement'
     ])
     notes            = serializers.CharField(required=False, allow_blank=True)
     items            = serializers.ListField(child=serializers.DictField())
 
+    def validate(self, attrs):
+        if not attrs.get('address_id') and not attrs.get('shipping_address'):
+            raise serializers.ValidationError(
+                {'shipping_address': 'address_id ou shipping_address requis.'}
+            )
+        return attrs
+
 
 # ══════════════════════════════════════════════════════════════════
-# SUPPLIER SUB-ORDER (espace fournisseur)
+# SUPPLIER SUB-ORDER
 # ══════════════════════════════════════════════════════════════════
 class SupplierSubOrderSerializer(serializers.ModelSerializer):
 
@@ -101,10 +115,10 @@ class SupplierSubOrderSerializer(serializers.ModelSerializer):
                   'items', 'items_count', 'primary_image']
 
     def get_items_count(self, obj):
-        return len(obj.items.all())        # ⚡ cache prefetch
+        return len(obj.items.all())
 
     def get_primary_image(self, obj):
-        items = obj.items.all()            # ⚡ cache prefetch
+        items = obj.items.all()
         if not items:
             return None
         images = items[0].product.images.all()
@@ -115,7 +129,7 @@ class SupplierSubOrderSerializer(serializers.ModelSerializer):
 
 
 # ══════════════════════════════════════════════════════════════════
-# CART ITEM
+# CART ITEM (inchangé)
 # ══════════════════════════════════════════════════════════════════
 class CartItemSerializer(serializers.ModelSerializer):
 
@@ -139,7 +153,6 @@ class CartItemSerializer(serializers.ModelSerializer):
     def get_product(self, obj):
         p = obj.product
 
-        # ⚡ Image primaire via le cache du prefetch
         images = p.images.all()
         image_url = None
         for img in images:
@@ -149,7 +162,6 @@ class CartItemSerializer(serializers.ModelSerializer):
         if image_url is None and images:
             image_url = images[0].url
 
-        # Supplier
         supplier_data = None
         if p.supplier_id:
             s = p.supplier
@@ -162,7 +174,6 @@ class CartItemSerializer(serializers.ModelSerializer):
                 'verified': getattr(s, 'verified_status', '') == 'approved',
             }
 
-        # ⚡ .all() puis tri Python → cache prefetch ( .order_by() = nouvelle requête )
         tiers = [{
             'min_qty':   t.min_qty,
             'max_qty':   t.max_qty,

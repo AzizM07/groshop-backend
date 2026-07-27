@@ -1,18 +1,17 @@
 from rest_framework import serializers
-from .models import User, BuyerProfile, SupplierProfile, SupplierStore
+from .models import User, BuyerProfile, SupplierProfile, SupplierStore, Address
+
 
 # ── Register Buyer ────────────────────────────────────────────────
 class RegisterBuyerSerializer(serializers.ModelSerializer):
 
     password  = serializers.CharField(write_only=True, min_length=8)
-    # write_only → le mot de passe ne revient JAMAIS dans la réponse
 
     class Meta:
         model  = User
         fields = ['email', 'full_name', 'phone', 'password']
 
     def validate_email(self, value):
-        # Vérifie que l'email n'existe pas déjà
         if User.objects.filter(email=value.lower()).exists():
             raise serializers.ValidationError('Cet email est déjà utilisé.')
         return value.lower()
@@ -23,7 +22,6 @@ class RegisterBuyerSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        # Crée le user avec le mot de passe hashé
         user = User.objects.create_user(
             email     = validated_data['email'],
             password  = validated_data['password'],
@@ -31,7 +29,6 @@ class RegisterBuyerSerializer(serializers.ModelSerializer):
             phone     = validated_data.get('phone', ''),
             role      = 'buyer',
         )
-        # Crée le profil acheteur automatiquement
         BuyerProfile.objects.create(user=user)
         return user
 
@@ -62,8 +59,6 @@ class RegisterSupplierSerializer(serializers.ModelSerializer):
             role      = 'supplier',
         )
 
-        # Génère un slug unique à partir du nom de l'entreprise
-        import re
         from django.utils.text import slugify
         base_slug = slugify(company_name)
         slug      = base_slug
@@ -86,8 +81,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = ['id', 'email', 'full_name', 'phone', 'avatar_url', 'role', 'is_verified', 'created_at']
-        # id, email... → retournés dans la réponse
-        # password → jamais retourné car pas dans fields
+
 
 class SupplierStoreSerializer(serializers.ModelSerializer):
     class Meta:
@@ -101,7 +95,7 @@ class SupplierStoreSerializer(serializers.ModelSerializer):
 
 class SupplierPublicSerializer(serializers.ModelSerializer):
 
-    store         = SupplierStoreSerializer(read_only=True)
+    store          = SupplierStoreSerializer(read_only=True)
     total_products = serializers.SerializerMethodField()
 
     class Meta:
@@ -114,7 +108,36 @@ class SupplierPublicSerializer(serializers.ModelSerializer):
             'followers_count', 'created_at',
             'store', 'total_products',
         ]
-        # rc_number, tax_number → pas inclus → privés
 
     def get_total_products(self, obj):
         return obj.products.filter(status='approved').count()
+
+
+# ══════════════════════════════════════════════════════════════════
+# ADDRESS
+# ══════════════════════════════════════════════════════════════════
+class AddressSerializer(serializers.ModelSerializer):
+
+    formatted = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Address
+        fields = [
+            'id', 'full_name', 'phone',
+            'country', 'region', 'city', 'postal_code', 'street', 'additional',
+            'is_default', 'created_at', 'updated_at', 'formatted',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'formatted']
+
+    def get_formatted(self, obj):
+        return obj.formatted()
+
+    def validate(self, attrs):
+        required_on_create = ['full_name', 'phone', 'region', 'city', 'postal_code', 'street']
+        if self.instance is None:  # création
+            missing = [f for f in required_on_create if not attrs.get(f)]
+            if missing:
+                raise serializers.ValidationError(
+                    {f: 'Champ obligatoire.' for f in missing}
+                )
+        return attrs
