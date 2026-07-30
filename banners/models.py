@@ -3,6 +3,8 @@ from django.db import models
 
 class Banner(models.Model):
     ZONES = (
+        ('hero_bg', 'Fond du Hero'),
+        ('bottom_slider', 'Slider du bas'),
         ('hero_slider', 'Hero Slider'),
         ('side_card', 'Side Card'),
     )

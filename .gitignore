@@ -26,7 +26,7 @@ db.sqlite3-journal
 media/
 staticfiles/
 static_root/
-
+data.ms/
 # Migrations générées automatiquement (optionnel, on garde souvent)
 # */migrations/*.py
 # !*/migrations/__init__.py
@@ -62,3 +62,4 @@ logs/
 # Fichiers temporaires
 *.tmp
 *.bak
+meilisearch.exe

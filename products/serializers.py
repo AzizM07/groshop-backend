@@ -33,7 +33,7 @@ class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model  = Category
         fields = ['id', 'name', 'slug', 'icon_name', 'image_url',
-                  'is_hot', 'is_new', 'sort_order', 'children']
+                  'is_hot', 'is_new', 'sort_order', 'children','banner_url', 'banner_link',]
 
     def get_children(self, obj):
         children = obj.children.filter(is_active=True)
@@ -77,6 +77,7 @@ class ProductChoiceGroupSerializer(serializers.ModelSerializer):
 class ProductListSerializer(serializers.ModelSerializer):
 
     primary_image     = serializers.SerializerMethodField()
+    images            = ProductImageSerializer(many=True, read_only=True)   # ← AJOUT
     supplier_name     = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug     = serializers.CharField(source='supplier.slug', read_only=True)
     supplier_verified = serializers.CharField(source='supplier.verification_status', read_only=True)
@@ -95,13 +96,12 @@ class ProductListSerializer(serializers.ModelSerializer):
             'sold_count', 'rating_avg', 'rating_count',
             'badge_choice', 'badge_flash', 'badge_flash_end',
             'is_free_shipping',
-            'primary_image',
+            'primary_image', 'images',                                      # ← AJOUT
             'supplier_name', 'supplier_slug', 'supplier_verified', 'supplier_medals',
             'category_name',
             'years_active',
             'price_tiers',
         ]
-
     def get_primary_image(self, obj):
         return _primary_image_url(obj)
 

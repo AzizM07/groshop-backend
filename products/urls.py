@@ -9,7 +9,10 @@ urlpatterns = [
     path('trending/',     views.trending_products,  name='trending-products'),
     path('recommended/',  views.recommended_products, name='recommended-products'),
     path('categories/',   views.categories_list,    name='categories-list'),
-
+    path('admin/categories/',           views.admin_categories,       name='admin-categories'),
+    path('admin/categories/<uuid:pk>/', views.admin_category_detail,  name='admin-category-detail'),
+    path('category-banner/', views.category_banner, name='category-banner'),
+    path('admin/categories/<uuid:pk>/banner/', views.admin_category_banner, name='admin-category-banner'),
     # ── Favoris acheteur (routes statiques AVANT <uuid:pk>) ──
     path('favorites/',                   views.favorites,       name='favorites'),
     path('favorites/<uuid:product_id>/', views.favorite_detail, name='favorite-detail'),
@@ -21,6 +24,7 @@ urlpatterns = [
 
     # ── Détail produit (UUID) — doit rester en dernier ──
     path('reviews/create/', views.create_review, name='review-create'),
+    path('autocomplete/', views.search_autocomplete, name='search-autocomplete'),
     path('<uuid:pk>/',                 views.product_detail,          name='product-detail'),
     path('<uuid:pk>/similar/',         views.similar_products,        name='similar-products'),
     path('<uuid:pk>/reviews/',         views.product_reviews,         name='product-reviews'),

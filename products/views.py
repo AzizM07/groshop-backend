@@ -1,18 +1,17 @@
 import os
 import uuid as _uuid
-
-from rest_framework.decorators import api_view, permission_classes, parser_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from rest_framework import status
-from django.db.models import Avg, Count, F, Exists, OuterRef
-
-from django.db.models import Q
+from django.utils.text import slugify
+from django.db.models import Avg, Count, F, Exists, OuterRef, Q
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 
-from .models import Category, Product, Review, ReviewPhoto, Favorite   # ← Favorite ajouté
+from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+from rest_framework import status
+
+from .models import Category, Product, Review, ReviewPhoto, Favorite
 from .serializers import (
     CategorySerializer, ProductListSerializer,
     ProductDetailSerializer, ReviewSerializer,
@@ -30,6 +29,255 @@ def categories_list(request):
     ).prefetch_related('children')
     serializer = CategorySerializer(categories, many=True)
     return Response(serializer.data)
+
+
+# ── Public : bannière d'une catégorie pour la page de recherche ───
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def category_banner(request):
+    """
+    Renvoie la bannière (image + lien) de la catégorie/sous-catégorie
+    correspondant au terme recherché. Match par slug (prioritaire)
+    puis par nom (insensible à la casse). {'banner': None} si aucune
+    catégorie ne correspond ou si elle n'a pas de bannière.
+    """
+    q    = (request.GET.get('q') or '').strip()
+    slug = (request.GET.get('slug') or '').strip()
+    if not q and not slug:
+        return Response({'banner': None})
+
+    cat = None
+    if slug:
+        cat = Category.objects.filter(slug__iexact=slug, is_active=True).first()
+    if cat is None and q:
+        cat = (Category.objects.filter(name__iexact=q, is_active=True).first()
+               or Category.objects.filter(slug__iexact=slugify(q), is_active=True).first())
+
+    if cat is None or not cat.banner_url:
+        return Response({'banner': None})
+
+    return Response({
+        'banner': {
+            'image_url': cat.banner_url,
+            'link':      cat.banner_link or None,
+        }
+    })
+
+
+# ── Admin : Catégories (CRUD) ─────────────────────────────────────
+def _cat_dict(cat):
+    return {
+        'id': str(cat.id),
+        'name': cat.name,
+        'slug': cat.slug,
+        'icon_name': cat.icon_name,
+        'image_url': cat.image_url,
+        'banner_url': cat.banner_url,        # ← bannière de recherche
+        'banner_link': cat.banner_link,      # ← lien au clic
+        'parent': str(cat.parent_id) if cat.parent_id else None,
+        'parent_name': cat.parent.name if cat.parent_id else None,
+        'is_hot': cat.is_hot,
+        'is_new': cat.is_new,
+        'is_active': cat.is_active,
+        'sort_order': cat.sort_order,
+        'product_count': Product.objects.filter(category=cat).count(),
+    }
+
+
+def _save_category(request, cat):
+    is_create = cat is None
+    if is_create:
+        cat = Category()
+    data = request.data
+
+    if 'name' in data:
+        cat.name = data.get('name', cat.name)
+    if 'icon_name' in data:
+        cat.icon_name = data.get('icon_name') or ''
+    if 'sort_order' in data:
+        try:
+            cat.sort_order = int(data.get('sort_order') or 0)
+        except (TypeError, ValueError):
+            cat.sort_order = 0
+    for flag in ('is_hot', 'is_new', 'is_active'):
+        if flag in data:
+            setattr(cat, flag, str(data.get(flag)).lower() in ('true', '1', 'on', 'yes'))
+    if 'parent' in data:
+        pval = data.get('parent')
+        cat.parent = None if pval in ('', 'null', 'None', None) else Category.objects.filter(id=pval).first()
+
+    f = request.FILES.get('image')
+    if f is not None:
+        ext  = os.path.splitext(f.name)[1].lower() or '.jpg'
+        key  = f'categories/{_uuid.uuid4().hex}{ext}'
+        path = default_storage.save(key, ContentFile(f.read()))
+        url  = default_storage.url(path)
+        if url.startswith('/'):
+            url = request.build_absolute_uri(url)
+        cat.image_url = url
+    elif 'image_url' in data:
+        cat.image_url = data.get('image_url') or ''
+
+    if not (cat.name or '').strip():
+        return Response({'error': 'Le nom est obligatoire.'}, status=400)
+
+    if not cat.slug:
+        base = slugify(cat.name)[:140] or 'categorie'
+        slug, i = base, 2
+        qs = Category.objects.filter(slug=slug)
+        while (qs.exclude(id=cat.id) if cat.id else qs).exists():
+            slug, i = f'{base}-{i}', i + 1
+            qs = Category.objects.filter(slug=slug)
+        cat.slug = slug
+
+    cat.save()
+    return Response(_cat_dict(cat), status=201 if is_create else 200)
+
+
+# ── Autocomplete pro (Meilisearch + catégories + complétions) ─────
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def search_autocomplete(request):
+    q = request.query_params.get('q', '').strip()
+    if len(q) < 2:
+        return Response({'completions': [], 'products': [], 'categories': []})
+
+    from . import search as meili
+
+    # 1) Produits — Meilisearch (fuzzy), uniquement les approuvés
+    try:
+        res = meili.get_index().search(q, {
+            'limit': 5,
+            'filter': 'status = "approved"',
+            'attributesToRetrieve': ['id', 'name', 'slug', 'base_price_tnd', 'primary_image'],
+        })
+        hits = res.get('hits', [])
+    except Exception:
+        hits = []
+
+    products = [{
+        'id':    h['id'],
+        'name':  h['name'],
+        'slug':  h.get('slug'),
+        'price': h.get('base_price_tnd'),
+        'image': h.get('primary_image'),
+    } for h in hits]
+
+    # 2) Catégories — depuis ta base
+    cats = Category.objects.filter(
+        name__icontains=q, is_active=True,
+    ).values('id', 'name', 'slug')[:4]
+    categories = [{'id': str(c['id']), 'name': c['name'], 'slug': c['slug']} for c in cats]
+
+    # 3) Complétions — requêtes populaires + noms produits
+    completions = _build_completions(q, hits)
+
+    return Response({
+        'completions': completions,
+        'products':    products,
+        'categories':  categories,
+    })
+
+
+def _build_completions(q, hits, limit=5):
+    out, seen = [], set()
+    ql = q.lower()
+
+    # a) requêtes déjà tapées, les + fréquentes qui commencent par q
+    try:
+        from store.models import SearchHistory
+        from django.db.models import Count
+        popular = (SearchHistory.objects
+                   .filter(query__istartswith=q)
+                   .values('query').annotate(n=Count('id'))
+                   .order_by('-n')[:limit])
+        for row in popular:
+            term = (row['query'] or '').strip().lower()
+            if term and term not in seen:
+                seen.add(term); out.append(term)
+    except Exception:
+        pass
+
+    # b) complète avec des noms de produits nettoyés si pas assez
+    for h in hits:
+        if len(out) >= limit:
+            break
+        name = (h.get('name') or '').split('·')[0].strip().lower()  # coupe "· lot x50"
+        if name and name not in seen and ql in name:
+            seen.add(name); out.append(name)
+
+    return out[:limit]
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAdminUser])
+@parser_classes([MultiPartParser, FormParser])
+def admin_categories(request):
+    if request.method == 'GET':
+        cats = Category.objects.select_related('parent').order_by('sort_order', 'name')
+        return Response([_cat_dict(c) for c in cats])
+    return _save_category(request, None)
+
+
+@api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
+@permission_classes([IsAdminUser])
+@parser_classes([MultiPartParser, FormParser])
+def admin_category_detail(request, pk):
+    try:
+        cat = Category.objects.select_related('parent').get(id=pk)
+    except Category.DoesNotExist:
+        return Response({'error': 'Catégorie introuvable'}, status=404)
+    if request.method == 'DELETE':
+        cat.delete()
+        return Response(status=204)
+    if request.method == 'GET':
+        return Response(_cat_dict(cat))
+    return _save_category(request, cat)
+
+
+# ── Admin : bannière de recherche d'une catégorie ─────────────────
+@api_view(['GET', 'POST', 'DELETE'])
+@permission_classes([IsAdminUser])
+@parser_classes([MultiPartParser, FormParser])
+def admin_category_banner(request, pk):
+    """
+    GET    → {banner_url, banner_link}
+    POST   → enregistre : soit un fichier (banner_image → upload storage),
+             soit une URL (banner_url, galerie), + banner_link.
+    DELETE → vide la bannière.
+    """
+    try:
+        cat = Category.objects.get(id=pk)
+    except Category.DoesNotExist:
+        return Response({'error': 'Catégorie introuvable'}, status=404)
+
+    if request.method == 'GET':
+        return Response({'banner_url': cat.banner_url, 'banner_link': cat.banner_link})
+
+    if request.method == 'DELETE':
+        cat.banner_url = ''
+        cat.banner_link = ''
+        cat.save(update_fields=['banner_url', 'banner_link'])
+        return Response(status=204)
+
+    # POST
+    data = request.data
+    banner_url = data.get('banner_url', '') or cat.banner_url
+
+    f = request.FILES.get('banner_image')
+    if f is not None:
+        ext  = os.path.splitext(f.name)[1].lower() or '.jpg'
+        key  = f'categories/banners/{_uuid.uuid4().hex}{ext}'
+        path = default_storage.save(key, ContentFile(f.read()))
+        url  = default_storage.url(path)
+        if url.startswith('/'):
+            url = request.build_absolute_uri(url)
+        banner_url = url
+
+    cat.banner_url  = banner_url
+    cat.banner_link = data.get('banner_link', '') or ''
+    cat.save(update_fields=['banner_url', 'banner_link'])
+    return Response({'banner_url': cat.banner_url, 'banner_link': cat.banner_link})
 
 
 # ── Recommandations (sous profil boutique) ────────────────────────
@@ -227,7 +475,7 @@ def product_detail(request, pk):
     return Response(serializer.data)
 
 
-# ── Search ────────────────────────────────────────────────────────
+# ── Search (via Meilisearch — tolérant aux fautes) ────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def search_products(request):
@@ -236,25 +484,46 @@ def search_products(request):
     if not query:
         return Response({'error': 'Paramètre q obligatoire.'}, status=400)
 
-    products = Product.objects.filter(
-        status='approved'
-    ).filter(
-        Q(name__icontains=query) |
-        Q(description__icontains=query) |
-        Q(category__name__icontains=query) |
-        Q(supplier__company_name__icontains=query)
-    ).select_related(
-        'supplier', 'supplier__store', 'category'
-    ).prefetch_related('images').order_by('-sold_count')
+    from . import search as meili
+
+    # 1) Meilisearch renvoie les IDs correspondants (fuzzy), classés par pertinence
+    try:
+        res = meili.get_index().search(query, {
+            'limit': 40,
+            'attributesToRetrieve': ['id'],
+        })
+        ids = [h['id'] for h in res.get('hits', [])]
+    except Exception:
+        ids = None   # Meilisearch down → fallback Postgres plus bas
+
+    if ids is not None:
+        # 2) On recharge les produits complets depuis Postgres (pour la sérialisation)
+        products_qs = Product.objects.filter(
+            status='approved', id__in=ids,
+        ).select_related('supplier', 'supplier__store', 'category').prefetch_related('images')
+
+        # 3) On respecte l'ordre de pertinence de Meilisearch
+        by_id = {str(p.id): p for p in products_qs}
+        products = [by_id[i] for i in ids if i in by_id]
+    else:
+        # Fallback : ancienne recherche Postgres si Meilisearch est éteint
+        products = list(Product.objects.filter(
+            status='approved'
+        ).filter(
+            Q(name__icontains=query) |
+            Q(description__icontains=query) |
+            Q(category__name__icontains=query) |
+            Q(supplier__company_name__icontains=query)
+        ).select_related('supplier', 'supplier__store', 'category').prefetch_related('images').order_by('-sold_count')[:20])
 
     if request.user.is_authenticated:
         from store.models import SearchHistory
         SearchHistory.objects.create(
-            user=request.user, query=query, result_count=products.count(),
+            user=request.user, query=query, result_count=len(products),
         )
 
     serializer = ProductListSerializer(products[:20], many=True)
-    return Response({'query': query, 'total': products.count(), 'results': serializer.data})
+    return Response({'query': query, 'total': len(products), 'results': serializer.data})
 
 
 # ── Similar Products ──────────────────────────────────────────────

@@ -2,7 +2,7 @@ from pathlib import Path
 from decouple import config, Csv
 from datetime import timedelta
 import dj_database_url
-
+import os
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ═══════════════════════════════════════════════════════════════════
@@ -84,7 +84,8 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'groshop.wsgi.application'
-
+MEILISEARCH_URL  = config('MEILISEARCH_URL',  default='http://localhost:7700')
+MEILI_MASTER_KEY = config('MEILI_MASTER_KEY', default='')
 # ⭐ Domaine des cookies — vide en local, '.groshop.tn' en prod
 # Le point initial fait que le cookie posé par api.groshop.tn
 # est renvoyé à groshop.tn (même site → SameSite=Lax suffit)
@@ -262,7 +263,8 @@ else:
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-
+# Clé de service Firebase : soit un chemin de fichier, soit le JSON complet (Render → variable d'env)
+FIREBASE_CREDENTIALS = os.environ.get('FIREBASE_CREDENTIALS', '')
 # ═══════════════════════════════════════════════════════════════════
 # LOCALIZATION
 # ═══════════════════════════════════════════════════════════════════

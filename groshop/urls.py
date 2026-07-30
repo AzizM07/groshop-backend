@@ -7,7 +7,7 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/',             admin.site.urls),
     path('api/auth/',          include('users.urls')),
-
+    path('api/notifications/', include('notifications.urls')),
     # ── Espace admin/CEO (Bearer / IsAdmin), tout sous /api/admin/ ──
     path('api/admin/',         include('users.admin_urls')),    # auth : login / logout
     path('api/admin/',         include('orders.admin_urls')),   # stats + commandes (lecture)

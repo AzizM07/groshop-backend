@@ -19,6 +19,8 @@ class Category(models.Model):
     is_new     = models.BooleanField(default=False)
     sort_order = models.IntegerField(default=0)
     is_active  = models.BooleanField(default=True)
+    banner_url  = models.TextField(blank=True, default='')                 # URL de l'image (Supabase / externe)
+    banner_link = models.CharField(max_length=500, blank=True, default='') # lien au clic (URL externe ou chemin interne /...)
 
     class Meta:
         db_table = 'categories'
