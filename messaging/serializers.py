@@ -1,5 +1,6 @@
-# messaging/serializers.py
+# messaging/serializers.py — GROSHOP.tn
 from rest_framework import serializers
+from django.utils import timezone
 from .models import Conversation, Message
 
 
@@ -27,12 +28,11 @@ def _supplier_data(s):
         logo = s.store.logo_url if hasattr(s, 'store') else None
     except Exception:
         logo = None
-    
-    # Statut online via le user du supplier
+
     user = getattr(s, 'user', None)
     is_online = user.is_online if user else False
     last_seen = user.last_seen.isoformat() if user and user.last_seen else None
-    
+
     return {
         'id':              str(s.id),
         'name':            getattr(s, 'company_name', '') or '',
@@ -47,9 +47,12 @@ def _supplier_data(s):
 
 
 def _buyer_data(b):
+    # Choix produit : NOM RÉEL du client (B2B). On n'expose jamais tél/email/adresse.
+    city = getattr(b, 'city', None) or getattr(b, 'ville', None) or ''
     return {
         'id':         str(b.id),
         'full_name':  getattr(b, 'full_name', '') or '',
+        'city':       city,
         'avatar_url': getattr(b, 'avatar_url', None),
         'is_online':  b.is_online,
         'last_seen':  b.last_seen.isoformat() if b.last_seen else None,
@@ -68,6 +71,7 @@ class ConversationListSerializer(serializers.ModelSerializer):
     buyer    = serializers.SerializerMethodField()
 
     buyer_name    = serializers.CharField(source='buyer.full_name', read_only=True)
+    product_name  = serializers.CharField(source='product.name', read_only=True)
     last_message  = serializers.SerializerMethodField()
     unread_count  = serializers.SerializerMethodField()
 
@@ -75,7 +79,8 @@ class ConversationListSerializer(serializers.ModelSerializer):
         model  = Conversation
         fields = ['id', 'supplier', 'buyer',
                   'supplier_name', 'supplier_slug', 'supplier_logo',
-                  'buyer_name', 'last_msg_at', 'last_message', 'unread_count']
+                  'buyer_name', 'product_name',
+                  'last_msg_at', 'last_message', 'unread_count']
 
     def get_supplier(self, obj): return _supplier_data(obj.supplier)
     def get_buyer(self, obj):    return _buyer_data(obj.buyer)
@@ -106,17 +111,20 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
     supplier_slug = serializers.CharField(source='supplier.slug', read_only=True)
     product_name  = serializers.CharField(source='product.name', read_only=True)
 
-    supplier = serializers.SerializerMethodField()
-    buyer    = serializers.SerializerMethodField()
+    supplier    = serializers.SerializerMethodField()
+    buyer       = serializers.SerializerMethodField()
+    # curseur serveur : le front l'utilise comme point de départ du poll incrémental
+    server_time = serializers.SerializerMethodField()
 
     class Meta:
         model  = Conversation
         fields = ['id', 'supplier', 'buyer',
                   'supplier_name', 'supplier_slug',
-                  'product_name', 'last_msg_at', 'messages']
+                  'product_name', 'last_msg_at', 'messages', 'server_time']
 
-    def get_supplier(self, obj): return _supplier_data(obj.supplier)
-    def get_buyer(self, obj):    return _buyer_data(obj.buyer)
+    def get_supplier(self, obj):   return _supplier_data(obj.supplier)
+    def get_buyer(self, obj):      return _buyer_data(obj.buyer)
+    def get_server_time(self, obj): return timezone.now().isoformat()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -125,3 +133,9 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
 class SendMessageSerializer(serializers.Serializer):
     content        = serializers.CharField(min_length=1, max_length=2000)
     attachment_url = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_attachment_url(self, v):
+        # Sécurité : on n'accepte qu'une URL https (ou vide). Bloque javascript:, data:, etc.
+        if v and not v.startswith('https://'):
+            raise serializers.ValidationError("Pièce jointe invalide (https requis).")
+        return v

@@ -1,3 +1,4 @@
+# messaging/models.py — GROSHOP.tn
 from django.db import models
 import uuid
 from users.models import User, SupplierProfile
@@ -22,6 +23,10 @@ class Conversation(models.Model):
                 name='unique_conversation'
             )
         ]
+        indexes = [
+            models.Index(fields=['buyer', 'last_msg_at']),
+            models.Index(fields=['supplier', 'last_msg_at']),
+        ]
 
     def __str__(self):
         return f'{self.buyer.full_name} ↔ {self.supplier.company_name}'
@@ -40,6 +45,12 @@ class Message(models.Model):
     class Meta:
         db_table = 'messages'
         ordering = ['created_at']
+        indexes = [
+            # accélère le poll incrémental (created_at > cursor) par conversation
+            models.Index(fields=['conversation', 'created_at']),
+            # accélère le comptage des non-lus / marquage lu
+            models.Index(fields=['conversation', 'is_read']),
+        ]
 
     def __str__(self):
         return f'Message de {self.sender.full_name}'
