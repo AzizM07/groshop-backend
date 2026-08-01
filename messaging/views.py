@@ -142,13 +142,16 @@ def conversation_poll(request, pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def unread_count(request):
-    """Total des messages non lus, tous fils confondus. Pour le badge de nav."""
+    """Badge messagerie. 'count' = nombre de DISCUSSIONS non lues (comme le
+    panier compte des articles) ; 'messages' = total de messages non lus."""
     convs = _conversations_for(request.user)
-    count = (Message.objects
-             .filter(conversation__in=convs, is_read=False)
-             .exclude(sender=request.user)
-             .count())
-    return Response({'count': count})
+    unread = (Message.objects
+              .filter(conversation__in=convs, is_read=False)
+              .exclude(sender=request.user))
+    return Response({
+        'count':    unread.values('conversation').distinct().count(),
+        'messages': unread.count(),
+    })
 
 
 @api_view(['POST'])
