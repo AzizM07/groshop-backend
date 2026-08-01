@@ -1,6 +1,6 @@
 # analytics/serializers.py — GROSHOP.tn
 from rest_framework import serializers
-from .models import PageView, Session, MonthlyTarget, OrderChannel, OrderRegion
+from .models import PageView, ProductEvent, Session, MonthlyTarget, OrderChannel, OrderRegion
 
 
 class PageViewCreateSerializer(serializers.ModelSerializer):
@@ -13,14 +13,27 @@ class PageViewCreateSerializer(serializers.ModelSerializer):
         model  = PageView
         fields = [
             'supplier', 'product', 'page_type',
-            'session_id', 'channel', 'device_type',
+            'session_id', 'client_view_id', 'channel', 'device_type',
             'utm_source', 'utm_medium', 'utm_campaign', 'referrer',
         ]
         extra_kwargs = {
-            'supplier': {'required': False, 'allow_null': True},
-            'product':  {'required': False, 'allow_null': True},
-            'referrer': {'required': False, 'allow_blank': True},
+            'supplier':       {'required': False, 'allow_null': True},
+            'product':        {'required': False, 'allow_null': True},
+            'referrer':       {'required': False, 'allow_blank': True},
+            'client_view_id': {'required': False, 'allow_blank': True},
         }
+
+
+class ProductEventCreateSerializer(serializers.ModelSerializer):
+    """Écriture seule — clic significatif sur une fiche produit."""
+
+    session_id = serializers.CharField(source='session_key', max_length=64,
+                                       required=False, allow_blank=True)
+
+    class Meta:
+        model  = ProductEvent
+        fields = ['product', 'event_type', 'session_id']
+        # supplier & user sont injectés par la vue (track_product_event)
 
 
 class SessionSerializer(serializers.ModelSerializer):
@@ -38,7 +51,6 @@ class MonthlyTargetSerializer(serializers.ModelSerializer):
         fields = ['id', 'year', 'month', 'period_label',
                   'revenue_target', 'orders_target',
                   'new_buyers_target', 'views_target', 'updated_at']
-        # supplier & created_by sont injectés par la vue (perform_create)
 
     def validate_month(self, value):
         if not 1 <= value <= 12:

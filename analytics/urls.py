@@ -8,6 +8,8 @@ from . import views
 urlpatterns = [
     # ── Tracking (public) ──
     path('pageview/',              views.track_pageview,                     name='track-pageview'),
+    path('duration/',              views.track_duration,                     name='track-duration'),
+    path('product-event/',         views.track_product_event,                name='track-product-event'),
 
     # ── Stats fournisseur ──
     path('supplier/stats/',        views.SupplierAnalyticsView.as_view(),    name='supplier-analytics'),

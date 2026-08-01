@@ -73,6 +73,15 @@ class PageView(models.Model):
                                     related_name='pageviews', null=True, blank=True)
     session_key = models.CharField(max_length=64, db_index=True)
 
+    # ── Identifiant de vue généré côté client (une valeur par ouverture de page) ──
+    # Sert à rattacher le "temps passé" (envoyé plus tard, à la sortie de page)
+    # à la BONNE ligne de vue, sans dépendre de l'id DB.
+    client_view_id = models.CharField(max_length=64, blank=True, db_index=True)
+
+    # Temps passé sur la page, en millisecondes. Rempli a posteriori par le
+    # beacon de sortie (POST /api/analytics/duration/). NULL tant qu'inconnu.
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+
     user       = models.ForeignKey('users.User', on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name='page_views')
 
@@ -97,6 +106,45 @@ class PageView(models.Model):
 
     def __str__(self):
         return f"PageView [{self.page_type}] {self.viewed_at:%Y-%m-%d %H:%M}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# PRODUCT EVENT — interactions sur une fiche produit
+# ═══════════════════════════════════════════════════════════════
+class ProductEvent(models.Model):
+    """Un clic « significatif » sur une fiche produit (ouverture description,
+    ajout panier, etc.). POST /api/analytics/product-event/.
+    Alimente la colonne « engagement » du dashboard fournisseur."""
+
+    EVENT_TYPES = [
+        ('view_description', 'Ouverture description'),
+        ('view_image',       'Vue image / galerie'),
+        ('select_variant',   'Sélection variante'),
+        ('add_to_cart',      'Ajout au panier'),
+        ('contact_supplier', 'Contact fournisseur'),
+    ]
+
+    supplier    = models.ForeignKey('users.SupplierProfile', on_delete=models.CASCADE,
+                                    related_name='product_events', null=True, blank=True)
+    product     = models.ForeignKey('products.Product', on_delete=models.CASCADE,
+                                    related_name='events')
+    session_key = models.CharField(max_length=64, db_index=True, blank=True)
+    user        = models.ForeignKey('users.User', on_delete=models.SET_NULL,
+                                    null=True, blank=True, related_name='product_events')
+
+    event_type  = models.CharField(max_length=30, choices=EVENT_TYPES, db_index=True)
+    created_at  = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = 'analytics_product_event'
+        indexes  = [
+            models.Index(fields=['product', 'created_at']),
+            models.Index(fields=['product', 'event_type']),
+            models.Index(fields=['supplier', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"ProductEvent [{self.event_type}] #{self.product_id}"
 
 
 # ═══════════════════════════════════════════════════════════════

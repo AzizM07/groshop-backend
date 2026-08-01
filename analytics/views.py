@@ -6,15 +6,18 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, AllowAny
 from rest_framework.response import Response
 
-from django.db.models import Count, Sum, Q
+from django.db.models import Count, Sum, Avg, Q
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
-from .models import PageView, Session, MonthlyTarget, OrderChannel, OrderRegion
+from products.models import Product
+from .models import PageView, Session, ProductEvent, MonthlyTarget, OrderChannel, OrderRegion
 from .serializers import (
-    PageViewCreateSerializer, MonthlyTargetSerializer,
-    OrderChannelSerializer, OrderRegionSerializer,
+    PageViewCreateSerializer, ProductEventCreateSerializer,
+    MonthlyTargetSerializer, OrderChannelSerializer, OrderRegionSerializer,
 )
+
+DURATION_CAP_MS = 30 * 60 * 1000   # 30 min : au-delà, on ignore (onglet oublié)
 
 
 # ── Permission fournisseur ────────────────────────────────────────
@@ -29,13 +32,43 @@ class IsSupplier(BasePermission):
         )
 
 
+# ── Helpers produit (défensifs : adapte si tes champs diffèrent) ──
+def _product_name(p):
+    if not p:
+        return '—'
+    for attr in ('name', 'title', 'label'):
+        v = getattr(p, attr, None)
+        if v:
+            return str(v)
+    return f"Produit #{getattr(p, 'id', '')}"
+
+
+def _product_image(p):
+    """Renvoie une URL d'image ou None. Teste plusieurs conventions courantes."""
+    if not p:
+        return None
+    for attr in ('primary_image', 'image', 'thumbnail', 'cover'):
+        v = getattr(p, attr, None)
+        if v:
+            return getattr(v, 'url', None) or (str(v) if not callable(v) else None)
+    imgs = getattr(p, 'images', None)
+    first = imgs.first() if hasattr(imgs, 'first') else None
+    if first:
+        for a in ('image', 'url', 'file', 'src'):
+            v = getattr(first, a, None)
+            if v:
+                return getattr(v, 'url', None) or str(v)
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════
 # TRACKING
 # ══════════════════════════════════════════════════════════════════
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def track_pageview(request):
-    """POST /api/analytics/pageview/ — fire-and-forget depuis le front."""
+    """POST /api/analytics/pageview/ — fire-and-forget depuis le front.
+    Ouvert à tous : un visiteur NON connecté est compté normalement."""
     ser = PageViewCreateSerializer(data=request.data)
     ser.is_valid(raise_exception=True)
 
@@ -58,18 +91,63 @@ def track_pageview(request):
         if not created:
             session.last_activity   = timezone.now()
             session.page_view_count += 1
-            # rattache l'user si connexion en cours de session
             if user and not session.user_id:
                 session.user = user
                 session.save(update_fields=['last_activity', 'page_view_count', 'user'])
             else:
                 session.save(update_fields=['last_activity', 'page_view_count'])
 
+    # ── Attribution fournisseur : déduite du produit si le front ne l'envoie pas ──
+    product  = ser.validated_data.get('product')
+    supplier = ser.validated_data.get('supplier')
+    if supplier is None and product is not None:
+        supplier = getattr(product, 'supplier', None)
+
     ser.save(
         user=user,
         session=session,
+        supplier=supplier,
         user_agent=request.META.get('HTTP_USER_AGENT', '')[:1000],
     )
+    return Response({'ok': True}, status=201)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def track_duration(request):
+    """POST /api/analytics/duration/ — temps passé sur une fiche, envoyé à la
+    sortie de page (keepalive). Rattaché via client_view_id. Idempotent : on
+    garde la plus grande durée reçue, plafonnée à 30 min."""
+    vid = (request.data.get('client_view_id') or '').strip()
+    raw = request.data.get('duration_ms')
+    if not vid or raw is None:
+        return Response(status=204)
+    try:
+        ms = int(raw)
+    except (TypeError, ValueError):
+        return Response(status=204)
+    ms = max(0, min(ms, DURATION_CAP_MS))
+
+    pv = PageView.objects.filter(client_view_id=vid).order_by('-viewed_at').first()
+    if pv and (pv.duration_ms or 0) < ms:
+        pv.duration_ms = ms
+        pv.save(update_fields=['duration_ms'])
+    return Response(status=204)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def track_product_event(request):
+    """POST /api/analytics/product-event/ — clic significatif sur une fiche
+    (ouverture description, ajout panier…). Fournisseur déduit du produit."""
+    ser = ProductEventCreateSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+
+    product  = ser.validated_data.get('product')
+    supplier = getattr(product, 'supplier', None) if product else None
+    user     = request.user if request.user.is_authenticated else None
+
+    ser.save(user=user, supplier=supplier)
     return Response({'ok': True}, status=201)
 
 
@@ -77,7 +155,8 @@ def track_pageview(request):
 # STATS AUDIENCE / CONVERSION
 # ══════════════════════════════════════════════════════════════════
 class SupplierAnalyticsView(generics.GenericAPIView):
-    """GET /api/analytics/supplier/stats/ — audience, canaux, conversion, séries journalières."""
+    """GET /api/analytics/supplier/stats/ — audience, canaux, conversion,
+    séries journalières + classement par produit (7 j)."""
     permission_classes = [IsSupplier]
 
     def get(self, request):
@@ -87,10 +166,9 @@ class SupplierAnalyticsView(generics.GenericAPIView):
 
         views_qs = PageView.objects.filter(supplier=supplier, viewed_at__gte=month_start)
 
-        # ⚡ 1 seule requête pour le total + les uniques (au lieu de 2)
         agg = views_qs.aggregate(
             total=Count('id'),
-            uniques=Count('session_key', distinct=True),   # session_key = la chaîne, pas la FK
+            uniques=Count('session_key', distinct=True),
         )
         views_month     = agg['total'] or 0
         unique_visitors = agg['uniques'] or 0
@@ -104,7 +182,6 @@ class SupplierAnalyticsView(generics.GenericAPIView):
             pageviews__supplier=supplier, started_at__gte=month_start
         ).distinct()
 
-        # ⚡ 1 requête pour sessions + converties (au lieu de 2)
         s_agg = sessions_qs.aggregate(
             total=Count('id', distinct=True),
             conv=Count('id', distinct=True, filter=Q(converted=True)),
@@ -113,7 +190,6 @@ class SupplierAnalyticsView(generics.GenericAPIView):
         converted_count = s_agg['conv'] or 0
         conversion_rate = round(converted_count / sessions_count * 100, 2) if sessions_count else 0
 
-        # ⚡ 1 requête au lieu d'une par canal (avant : boucle → N requêtes)
         conv_rows = sessions_qs.values('channel').annotate(
             total=Count('id', distinct=True),
             conv=Count('id', distinct=True, filter=Q(converted=True)),
@@ -125,7 +201,7 @@ class SupplierAnalyticsView(generics.GenericAPIView):
             'rate':      round(r['conv'] / r['total'] * 100, 2) if r['total'] else 0,
         } for r in conv_rows]
 
-        # ── Séries journalières (14 derniers jours) — graphes hebdo du dashboard ──
+        # ── Séries journalières (14 derniers jours) ──
         d14 = (now - timedelta(days=13)).replace(hour=0, minute=0, second=0, microsecond=0)
 
         daily = (PageView.objects
@@ -137,7 +213,7 @@ class SupplierAnalyticsView(generics.GenericAPIView):
                      product_views=Count('id', filter=Q(page_type='product_detail')),
                  )
                  .order_by('d'))
-        rows = list(daily)   # ⚡ 1 requête pour les 2 séries (avant : 2 requêtes)
+        rows = list(daily)
 
         views_by_day = [
             {'date': r['d'].isoformat(), 'views': r['views'], 'uniques': r['uniques']}
@@ -147,6 +223,40 @@ class SupplierAnalyticsView(generics.GenericAPIView):
             {'date': r['d'].isoformat(), 'views': r['product_views']}
             for r in rows
         ]
+
+        # ── Classement par produit (7 derniers jours) ──
+        d7 = now - timedelta(days=7)
+        pv7 = PageView.objects.filter(
+            supplier=supplier, page_type='product_detail',
+            product__isnull=False, viewed_at__gte=d7,
+        )
+        per = list(pv7.values('product').annotate(
+            views=Count('id'),
+            uniques=Count('session_key', distinct=True),
+            avg_ms=Avg('duration_ms', filter=Q(duration_ms__lte=DURATION_CAP_MS)),
+        ).order_by('-views')[:12])
+
+        pids = [r['product'] for r in per]
+        ev = (ProductEvent.objects
+              .filter(product_id__in=pids, event_type='view_description', created_at__gte=d7)
+              .values('product').annotate(sess=Count('session_key', distinct=True)))
+        ev_map = {r['product']: r['sess'] for r in ev}
+        pmap   = {p.id: p for p in Product.objects.filter(id__in=pids)}
+
+        product_views_ranked = []
+        for r in per:
+            p    = pmap.get(r['product'])
+            uniq = r['uniques'] or 0
+            desc = ev_map.get(r['product'], 0)
+            product_views_ranked.append({
+                'product_id':     str(r['product']),
+                'name':           _product_name(p),
+                'image':          _product_image(p),
+                'views':          r['views'],
+                'uniques':        uniq,
+                'avg_seconds':    round((r['avg_ms'] or 0) / 1000),
+                'engagement_pct': min(round(desc / uniq * 100), 100) if uniq else 0,
+            })
 
         return Response({
             'views_month':           views_month,
@@ -160,11 +270,12 @@ class SupplierAnalyticsView(generics.GenericAPIView):
             'conversion_by_channel': conv_by_channel,
             'views_by_day':          views_by_day,
             'product_views_by_day':  product_views_by_day,
+            'product_views_ranked':  product_views_ranked,
         })
 
 
 class SupplierActiveUsersView(generics.GenericAPIView):
-    """GET /api/analytics/supplier/active-users/ — DAU / WAU / MAU (fenêtres glissantes)."""
+    """GET /api/analytics/supplier/active-users/ — DAU / WAU / MAU."""
     permission_classes = [IsSupplier]
 
     def get(self, request):
@@ -175,7 +286,6 @@ class SupplierActiveUsersView(generics.GenericAPIView):
         d7  = now - timedelta(days=7)
         d30 = now - timedelta(days=30)
 
-        # ⚡ 1 seule requête pour les 6 métriques (avant : 6 requêtes)
         a = PageView.objects.filter(supplier=supplier, viewed_at__gte=d30).aggregate(
             u_dau=Count('session_key', distinct=True, filter=Q(viewed_at__gte=d1)),
             u_wau=Count('session_key', distinct=True, filter=Q(viewed_at__gte=d7)),
@@ -185,7 +295,7 @@ class SupplierActiveUsersView(generics.GenericAPIView):
             a_mau=Count('user', distinct=True, filter=Q(user__isnull=False)),
         )
 
-        visitors = {'dau': a['u_dau'] or 0, 'wau': a['u_wau'] or 0, 'mau': a['u_mau'] or 0}
+        visitors   = {'dau': a['u_dau'] or 0, 'wau': a['u_wau'] or 0, 'mau': a['u_mau'] or 0}
         auth_users = {'dau': a['a_dau'] or 0, 'wau': a['a_wau'] or 0, 'mau': a['a_mau'] or 0}
 
         return Response({

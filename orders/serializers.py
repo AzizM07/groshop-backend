@@ -8,6 +8,7 @@ from .models import Order, SubOrder, OrderItem, CartItem
 # ══════════════════════════════════════════════════════════════════
 class OrderItemSerializer(serializers.ModelSerializer):
 
+    product_id       = serializers.UUIDField(source='product.id', read_only=True)   # ← ajout
     product_name     = serializers.CharField(source='product.name', read_only=True)
     product_slug     = serializers.CharField(source='product.slug', read_only=True)
     product_category = serializers.CharField(source='product.category.name',
@@ -16,8 +17,8 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = OrderItem
-        fields = ['id', 'product_name', 'product_slug', 'product_category', 'product_image',
-                  'quantity', 'unit_price_tnd', 'total_tnd']
+        fields = ['id', 'product_id', 'product_name', 'product_slug', 'product_category',
+                  'product_image', 'quantity', 'unit_price_tnd', 'total_tnd']
 
     def get_product_image(self, obj):
         images = obj.product.images.all()
@@ -47,12 +48,14 @@ class SubOrderSerializer(serializers.ModelSerializer):
 # ══════════════════════════════════════════════════════════════════
 class OrderListSerializer(serializers.ModelSerializer):
 
+    sub_orders       = SubOrderSerializer(many=True, read_only=True)   # ← ajout (option riche)
     sub_orders_count = serializers.SerializerMethodField()
 
     class Meta:
         model  = Order
         fields = ['id', 'status', 'payment_status', 'payment_method',
-                  'total_tnd', 'discount_tnd', 'created_at', 'sub_orders_count']
+                  'total_tnd', 'discount_tnd', 'created_at',
+                  'sub_orders', 'sub_orders_count']       # ← ajout
 
     def get_sub_orders_count(self, obj):
         return len(obj.sub_orders.all())
