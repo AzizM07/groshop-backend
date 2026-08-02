@@ -1,6 +1,6 @@
 from django.urls import path
 from . import views
-
+from . import social_auth
 urlpatterns = [
     path('register/buyer/',                 views.register_buyer,    name='register-buyer'),
     path('register/supplier/',              views.register_supplier, name='register-supplier'),
@@ -17,4 +17,6 @@ urlpatterns = [
     path('addresses/',                    views.addresses_list,       name='addresses_list'),
     path('addresses/<uuid:pk>/',          views.address_detail,       name='address_detail'),
     path('addresses/<uuid:pk>/default/',  views.address_set_default,  name='address_set_default'),
+    path('auth/<str:provider>/start/',    social_auth.social_start),
+    path('auth/<str:provider>/callback/', social_auth.social_callback),
 ]
