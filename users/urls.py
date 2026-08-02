@@ -16,7 +16,7 @@ urlpatterns = [
     path('suppliers/<slug:slug>/products/', views.supplier_products, name='supplier-products'),
     path('addresses/',                    views.addresses_list,       name='addresses_list'),
     path('addresses/<uuid:pk>/',          views.address_detail,       name='address_detail'),
-    path('addresses/<uuid:pk>/default/',  views.address_set_default,  name='address_set_default'),
-    path('auth/<str:provider>/start/',    social_auth.social_start),
-    path('auth/<str:provider>/callback/', social_auth.social_callback),
+path('addresses/<uuid:pk>/default/',  views.address_set_default,  name='address_set_default'),
+    path('<str:provider>/start/',    social_auth.social_start),
+    path('<str:provider>/callback/', social_auth.social_callback),
 ]
