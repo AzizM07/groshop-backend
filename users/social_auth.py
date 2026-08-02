@@ -54,7 +54,7 @@ PROVIDERS = {
         'authorize':     'https://www.facebook.com/v19.0/dialog/oauth',
         'token':         'https://graph.facebook.com/v19.0/oauth/access_token',
         'userinfo':      'https://graph.facebook.com/me?fields=id,name,email',
-        'scope':         'email public_profile',
+        'scope':         'email',
         'client_id':     config('FACEBOOK_APP_ID',     default=''),
         'client_secret': config('FACEBOOK_APP_SECRET', default=''),
         'extra_auth':    {},
