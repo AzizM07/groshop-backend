@@ -1,3 +1,6 @@
+import os
+import uuid
+
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import AllowAny, IsAdminUser
@@ -76,11 +79,28 @@ def active_layout(request):
     return Response({'code': 'two_cards', 'grid_style': '2fr 1fr'})
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAdminUser])
+@parser_classes([MultiPartParser, FormParser])
 def list_media(request):
-    """Liste les images d'un dossier du bucket, via le storage Django (= Supabase)."""
+    """
+    GET  : liste les images d'un dossier du bucket, via le storage Django (= Supabase).
+    POST : téléverse un fichier dans ce même dossier (donc sur Supabase) et renvoie { url }.
+           → l'onglet « Téléverser » de ImagePicker passe par là au lieu du /media Django.
+    """
     folder = request.GET.get('folder', 'banners')
+
+    if request.method == 'POST':
+        f = request.FILES.get('image')
+        if not f:
+            return Response({'detail': 'Aucun fichier'}, status=status.HTTP_400_BAD_REQUEST)
+        ext = os.path.splitext(f.name)[1].lower() or '.png'
+        key = f'{folder}/{uuid.uuid4().hex}{ext}'
+        # default_storage.save = le MÊME storage que la liste ci-dessous → écrit dans Supabase.
+        saved = default_storage.save(key, f)
+        return Response({'url': default_storage.url(saved)}, status=status.HTTP_201_CREATED)
+
+    # ── GET : liste du dossier ──
     try:
         _dirs, files = default_storage.listdir(folder)
     except Exception:
