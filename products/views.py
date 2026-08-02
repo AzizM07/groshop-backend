@@ -18,6 +18,9 @@ from .serializers import (
     ProductCreateSerializer, SupplierProductSerializer,
 )
 
+from PIL import Image
+from io import BytesIO
+
 
 # ── Categories ────────────────────────────────────────────────────
 @api_view(['GET'])
@@ -673,7 +676,6 @@ def create_product(request):
     p = ser.save()
     return Response({'id': str(p.id), 'slug': p.slug, 'status': p.status}, status=201)
 
-
 # ── Upload d'une image produit ────────────────────────────────────
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -687,9 +689,17 @@ def upload_product_image(request):
     if f.size > 5 * 1024 * 1024:
         return Response({'error': 'Fichier trop volumineux (max 5 Mo).'}, status=400)
 
-    ext  = os.path.splitext(f.name)[1].lower() or '.jpg'
-    key  = f"products/{_uuid.uuid4().hex}{ext}"
-    path = default_storage.save(key, ContentFile(f.read()))
+    # ── Optimisation : resize + conversion WebP ──
+    img = Image.open(f)
+    img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+    img.thumbnail((1200, 1200))  # garde le ratio, limite la plus grande dimension
+
+    buffer = BytesIO()
+    img.save(buffer, format='WEBP', quality=80)
+    buffer.seek(0)
+
+    key  = f"products/{_uuid.uuid4().hex}.webp"
+    path = default_storage.save(key, ContentFile(buffer.read()))
     url  = default_storage.url(path)
     if url.startswith('/'):
         url = request.build_absolute_uri(url)
