@@ -11,6 +11,28 @@ from django.core.files.storage import default_storage
 from .models import Banner, BannerImage, HeroLayout
 from .serializers import BannerSerializer, BannerImageSerializer, HeroLayoutSerializer
 
+from PIL import Image
+from io import BytesIO
+from django.core.files.uploadedfile import InMemoryUploadedFile
+from django.core.files.base import ContentFile
+import sys
+
+def optimize_uploaded_image(image_file, max_dim=1600, quality=82):
+    """Resize + convert to WebP, returns a new InMemoryUploadedFile."""
+    img = Image.open(image_file)
+    img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+    img.thumbnail((max_dim, max_dim))
+
+    buffer = BytesIO()
+    img.save(buffer, format='WEBP', quality=quality)
+    buffer.seek(0)
+
+    name = f"{os.path.splitext(image_file.name)[0]}.webp"
+    return InMemoryUploadedFile(
+        buffer, 'ImageField', name, 'image/webp',
+        sys.getsizeof(buffer), None
+    )
+
 
 # ── Admin CRUD ────────────────────────────────────────────────────
 class BannerViewSet(viewsets.ModelViewSet):
@@ -42,6 +64,9 @@ def add_banner_image(request, banner_id):
     image_url_ext = request.data.get('image_url_ext', '')
     if not image_file and not image_url_ext:
         return Response({'error': 'image ou image_url_ext requis'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if image_file:
+        image_file = optimize_uploaded_image(image_file)
 
     next_pos = banner.gallery_images.count()
     img = BannerImage.objects.create(
@@ -94,10 +119,16 @@ def list_media(request):
         f = request.FILES.get('image')
         if not f:
             return Response({'detail': 'Aucun fichier'}, status=status.HTTP_400_BAD_REQUEST)
-        ext = os.path.splitext(f.name)[1].lower() or '.png'
-        key = f'{folder}/{uuid.uuid4().hex}{ext}'
-        # default_storage.save = le MÊME storage que la liste ci-dessous → écrit dans Supabase.
-        saved = default_storage.save(key, f)
+
+        img = Image.open(f)
+        img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+        img.thumbnail((1600, 1600))
+        buffer = BytesIO()
+        img.save(buffer, format='WEBP', quality=82)
+        buffer.seek(0)
+
+        key = f'{folder}/{uuid.uuid4().hex}.webp'
+        saved = default_storage.save(key, ContentFile(buffer.read()))
         return Response({'url': default_storage.url(saved)}, status=status.HTTP_201_CREATED)
 
     # ── GET : liste du dossier ──
