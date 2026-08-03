@@ -19,8 +19,8 @@ class Category(models.Model):
     is_new     = models.BooleanField(default=False)
     sort_order = models.IntegerField(default=0)
     is_active  = models.BooleanField(default=True)
-    banner_url  = models.TextField(blank=True, default='')                 # URL de l'image (Supabase / externe)
-    banner_link = models.CharField(max_length=500, blank=True, default='') # lien au clic (URL externe ou chemin interne /...)
+    banner_url  = models.TextField(blank=True, default='')
+    banner_link = models.CharField(max_length=500, blank=True, default='')
 
     class Meta:
         db_table = 'categories'
@@ -31,6 +31,13 @@ class Category(models.Model):
 
 
 # ── Product ───────────────────────────────────────────────────────
+SHIPPING_MODES = [
+    ('free',      'Gratuite'),
+    ('flat',      'Fixe'),
+    ('tiered',    'Par tranche de quantité'),
+    ('per_block', 'Par palier'),
+]
+
 class Product(models.Model):
 
     STATUS = [
@@ -46,12 +53,13 @@ class Product(models.Model):
     name           = models.CharField(max_length=300)
     slug           = models.SlugField(max_length=350, unique=True)
     description    = models.TextField(blank=True)
-    sku            = models.CharField(max_length=100, blank=True)
+    sku            = models.CharField(max_length=100, blank=True)   # legacy — plus alimenté par le form
     unit           = models.CharField(max_length=50, blank=True)
-    moq            = models.IntegerField()
-    base_price_tnd = models.DecimalField(max_digits=10, decimal_places=3)
+    moq            = models.IntegerField()                          # auto = 1re tranche
+    base_price_tnd = models.DecimalField(max_digits=10, decimal_places=3)  # auto = prix 1re tranche
     video_url      = models.TextField(blank=True)
-    stock_qty      = models.IntegerField(default=0)
+    stock_qty      = models.IntegerField(default=0)                 # legacy
+    in_stock       = models.BooleanField(default=True)             # ← nouveau : dispo on/off
     sold_count     = models.IntegerField(default=0)
     view_count     = models.IntegerField(default=0)
     rating_avg     = models.DecimalField(max_digits=3, decimal_places=2, default=0)
@@ -62,16 +70,20 @@ class Product(models.Model):
     badge_flash_end= models.DateTimeField(null=True, blank=True)
     created_at     = models.DateTimeField(auto_now_add=True)
     updated_at     = models.DateTimeField(auto_now=True)
-    old_price_tnd    = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
-    is_free_shipping = models.BooleanField(default=False)
+    old_price_tnd    = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)  # auto = solde 1re tranche
+    is_free_shipping = models.BooleanField(default=False)           # dérivé de shipping_mode == 'free'
 
-    # ── NOUVEAUX CHAMPS ──────────────────────────────────────────
     brand      = models.CharField(max_length=100, blank=True, default='')
     reference  = models.CharField(max_length=100, blank=True, default='')  # code fabricant
-    pack_size  = models.PositiveIntegerField(default=1)  # ex: vendu par lot de X unités
-    specs_raw  = models.TextField(blank=True, default='')  # format libre "Clé: Valeur" par ligne
-    shipping_price_tnd = models.DecimalField(max_digits=10, decimal_places=3, default=0)  # prix livraison fixe, défini par le fournisseur
-    delivery_days       = models.PositiveIntegerField(default=3)  # délai estimé en jours, modifiable en admin
+    pack_size  = models.PositiveIntegerField(default=1)            # legacy — plus dans le form
+    specs_raw  = models.TextField(blank=True, default='')
+
+    # ── Livraison ──
+    shipping_mode        = models.CharField(max_length=12, choices=SHIPPING_MODES, default='flat')
+    shipping_price_tnd   = models.DecimalField(max_digits=10, decimal_places=3, default=0)  # mode 'flat'
+    shipping_block_size  = models.PositiveIntegerField(default=10)                          # mode 'per_block' : tous les N articles
+    shipping_block_price = models.DecimalField(max_digits=10, decimal_places=3, default=0)  # mode 'per_block' : + M DT par palier
+    delivery_days        = models.PositiveIntegerField(default=3)
 
     class Meta:
         db_table = 'products'
@@ -106,11 +118,12 @@ class ProductImage(models.Model):
 # ── ProductPriceTier ──────────────────────────────────────────────
 class ProductPriceTier(models.Model):
 
-    id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    product   = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='price_tiers')
-    min_qty   = models.IntegerField()
-    max_qty   = models.IntegerField(null=True, blank=True)
-    price_tnd = models.DecimalField(max_digits=10, decimal_places=3)
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product       = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='price_tiers')
+    min_qty       = models.IntegerField()
+    max_qty       = models.IntegerField(null=True, blank=True)      # calculé serveur (borne suivante-1, dernière = null)
+    price_tnd     = models.DecimalField(max_digits=10, decimal_places=3)
+    old_price_tnd = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)  # ← solde par tranche
 
     class Meta:
         db_table = 'product_price_tiers'
@@ -120,16 +133,27 @@ class ProductPriceTier(models.Model):
         return f'{self.product.name} | {self.min_qty}-{self.max_qty} → {self.price_tnd} TND'
 
 
-# ── ProductChoiceGroup (NOUVEAU) ──────────────────────────────────
+# ── ProductShippingTier (NOUVEAU) ─────────────────────────────────
+class ProductShippingTier(models.Model):
+    """Frais de livraison par tranche de quantité (mode 'tiered')."""
+    id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product   = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='shipping_tiers')
+    min_qty   = models.IntegerField()
+    price_tnd = models.DecimalField(max_digits=10, decimal_places=3)
+
+    class Meta:
+        db_table = 'product_shipping_tiers'
+        ordering = ['min_qty']
+
+    def __str__(self):
+        return f'{self.product.name} | {self.min_qty}+ → {self.price_tnd} TND livraison'
+
+
+# ── ProductChoiceGroup ────────────────────────────────────────────
 class ProductChoiceGroup(models.Model):
-    """
-    Groupe de choix nommé par le fournisseur : "Couleur", "Taille", "Modèle"…
-    Maximum 5 par produit (validé côté serializer).
-    Chaque groupe contient un nombre illimité de ProductVariant.
-    """
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product    = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='choice_groups')
-    name       = models.CharField(max_length=50)   # ex: "Couleur", "Taille"
+    name       = models.CharField(max_length=50)
     sort_order = models.IntegerField(default=0)
 
     class Meta:
@@ -142,17 +166,13 @@ class ProductChoiceGroup(models.Model):
 
 # ── ProductVariant ────────────────────────────────────────────────
 class ProductVariant(models.Model):
-    """
-    Une option à l'intérieur d'un groupe de choix.
-    ex: groupe "Couleur" → variantes "Rose", "Noir", "Blanc".
-    """
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product     = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
     group       = models.ForeignKey(
         ProductChoiceGroup, on_delete=models.CASCADE,
-        related_name='variants', null=True, blank=True,   # null = anciennes variantes
+        related_name='variants', null=True, blank=True,
     )
-    name        = models.CharField(max_length=50)   # ex: "Rose", "XL"
+    name        = models.CharField(max_length=50)
     image_url   = models.TextField(blank=True)
     sort_order  = models.IntegerField(default=0)
 
@@ -162,6 +182,7 @@ class ProductVariant(models.Model):
 
     def __str__(self):
         return f'{self.product.name} — {self.name}'
+
 
 # ── Review ────────────────────────────────────────────────────────
 class Review(models.Model):
@@ -174,8 +195,6 @@ class Review(models.Model):
     rating     = models.SmallIntegerField()
     comment    = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    # ── NOUVEAU CHAMP ────────────────────────────────────────────
     variant    = models.ForeignKey(
         ProductVariant, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='reviews_for_variant'
@@ -192,11 +211,8 @@ class Review(models.Model):
         return f'{self.rating}★'
 
 
-# ── ReviewPhoto (NOUVEAU) ──────────────────────────────────────────
+# ── ReviewPhoto ────────────────────────────────────────────────────
 class ReviewPhoto(models.Model):
-    """
-    Photos jointes à un avis (plusieurs possibles par avis).
-    """
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     review     = models.ForeignKey(Review, on_delete=models.CASCADE, related_name='photos')
     url        = models.TextField()
@@ -210,12 +226,8 @@ class ReviewPhoto(models.Model):
         return f'Photo {self.sort_order} → avis {self.review_id}'
 
 
-# ── Favorite (NOUVEAU) ─────────────────────────────────────────────
+# ── Favorite ───────────────────────────────────────────────────────
 class Favorite(models.Model):
-    """
-    Produit mis en favori par un acheteur (wishlist).
-    user = côté « client », product = côté « produit ».
-    """
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user       = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='favorites')
     product    = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='favorited_by')
