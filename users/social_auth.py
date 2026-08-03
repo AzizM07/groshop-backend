@@ -1,23 +1,24 @@
 # users/social_auth.py — GROSHOP.tn
-# Connexion sociale (Google / Facebook / LinkedIn) en flow "redirection serveur".
+# Connexion sociale (Google / Facebook / LinkedIn).
 #
-# Principe (identique pour les 3) :
-#   1. Le bouton front envoie l'utilisateur vers  /api/auth/<provider>/start/
-#   2. On le redirige vers le provider (Google/Facebook/LinkedIn) pour qu'il autorise.
-#   3. Le provider le renvoie vers  /api/auth/<provider>/callback/  avec un "code".
-#   4. On échange ce code contre un access_token, on récupère email + nom,
-#      on crée/retrouve le User, on pose TES cookies JWT, et on redirige vers le front.
+# Deux flux cohabitent :
+#   • REDIRECTION SERVEUR (Google, LinkedIn) : /start/ -> provider -> /callback/
+#   • TOKEN CLIENT (Facebook) : le front obtient l'access_token via le SDK JS
+#     (FB.login popup) puis le POST à /facebook/token/. AUCUNE navigation vers
+#     le callback -> plus de page rouge "Site dangereux" de Chrome.
 #
 # Aucune session Django n'est utilisée pour l'auth : on réutilise exactement
 # tes helpers cookies (set_auth_cookies / get_tokens_for_user) de views.py.
 # La session ne sert qu'à stocker le "state" anti-CSRF le temps de l'aller-retour.
 
+import json
 import secrets
 import urllib.parse
 import requests as http
 
-from django.http import HttpResponseRedirect, HttpResponseBadRequest
-from django.views.decorators.http import require_GET
+from django.http import HttpResponseRedirect, HttpResponseBadRequest, JsonResponse
+from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.csrf import csrf_exempt
 from decouple import config
 
 from .models import User
@@ -188,3 +189,78 @@ def social_callback(request, provider):
     response = HttpResponseRedirect(f'{FRONTEND_URL}/')
     set_auth_cookies(response, access, refresh)
     return response
+
+
+# ── 3) Facebook — flux TOKEN CLIENT (SDK JS, pas de redirection) ──
+@csrf_exempt
+@require_POST
+def facebook_token(request):
+    """
+    Le front envoie { access_token } obtenu via FB.login (SDK JS).
+    On VÉRIFIE le token côté Graph (debug_token = anti-usurpation), on récupère
+    email + nom, on pose les cookies JWT, et on renvoie l'utilisateur en JSON.
+    Aucune navigation vers /callback/ -> Chrome n'affiche jamais la page rouge.
+    """
+    cfg = PROVIDERS['facebook']
+    if not cfg['client_id'] or not cfg['client_secret']:
+        return JsonResponse({'error': 'notconfigured'}, status=503)
+
+    # token envoyé en JSON ou en form-data
+    access_token = ''
+    if request.content_type and 'application/json' in request.content_type:
+        try:
+            access_token = (json.loads(request.body or '{}').get('access_token') or '').strip()
+        except Exception:
+            access_token = ''
+    else:
+        access_token = (request.POST.get('access_token') or '').strip()
+
+    if not access_token:
+        return JsonResponse({'error': 'token'}, status=400)
+
+    app_token = f"{cfg['client_id']}|{cfg['client_secret']}"
+
+    # a) VÉRIFIE que le token a bien été émis pour NOTRE app (anti-substitution)
+    try:
+        dbg = http.get(
+            'https://graph.facebook.com/debug_token',
+            params={'input_token': access_token, 'access_token': app_token},
+            timeout=10,
+        ).json().get('data', {})
+    except Exception:
+        return JsonResponse({'error': 'token'}, status=400)
+
+    if not dbg.get('is_valid') or str(dbg.get('app_id')) != str(cfg['client_id']):
+        return JsonResponse({'error': 'token'}, status=401)
+
+    # b) profil (email + nom) via Graph
+    try:
+        ui = http.get(
+            cfg['userinfo'],
+            params={'access_token': access_token},
+            timeout=10,
+        ).json()
+    except Exception:
+        return JsonResponse({'error': 'userinfo'}, status=502)
+
+    email = (ui.get('email') or '').strip().lower()
+    full_name = ui.get('name') or ''
+    if not email:
+        return JsonResponse({'error': 'noemail'}, status=400)
+
+    user = _get_or_create_social_user(email, full_name)
+    if not user.is_active:
+        return JsonResponse({'error': 'disabled'}, status=403)
+
+    # c) pose TES cookies JWT et renvoie l'utilisateur (le front fait setUser)
+    refresh, access = get_tokens_for_user(user)
+    resp = JsonResponse({
+        'user': {
+            'id':        str(user.id),
+            'email':     user.email,
+            'full_name': user.full_name,
+            'role':      user.role,
+        }
+    })
+    set_auth_cookies(resp, access, refresh)
+    return resp
