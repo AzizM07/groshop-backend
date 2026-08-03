@@ -11,7 +11,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import status
-
+import subprocess, tempfile, shutil
 from .models import Category, Product, Review, ReviewPhoto, Favorite
 from .serializers import (
     CategorySerializer, ProductListSerializer,
@@ -714,6 +714,79 @@ def upload_product_image(request):
     if url.startswith('/'):
         url = request.build_absolute_uri(url)
     return Response({'url': url}, status=201)
+# ── Upload + compression d'une vidéo produit ──────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def upload_product_video(request):
+    f = request.FILES.get('file')
+    if not f:
+        return Response({'error': 'Aucun fichier.'}, status=400)
+
+    allowed = {'video/mp4', 'video/webm', 'video/quicktime',
+               'video/x-matroska', 'video/x-msvideo'}
+    if f.content_type not in allowed:
+        return Response({'error': 'Format non supporté (mp4, webm, mov, mkv, avi).'}, status=400)
+    if f.size > 100 * 1024 * 1024:
+        return Response({'error': 'Vidéo trop volumineuse (max 100 Mo).'}, status=400)
+
+    if not shutil.which('ffmpeg'):
+        return Response({'error': "Compression vidéo indisponible (ffmpeg non installé)."}, status=503)
+
+    tmp_dir     = tempfile.mkdtemp(prefix='vid_')
+    suffix      = os.path.splitext(f.name)[1].lower() or '.mp4'
+    in_path     = os.path.join(tmp_dir, f'in{suffix}')
+    out_path    = os.path.join(tmp_dir, 'out.mp4')
+    poster_path = os.path.join(tmp_dir, 'poster.webp')
+
+    try:
+        with open(in_path, 'wb') as dst:
+            for chunk in f.chunks():
+                dst.write(chunk)
+
+        # Transcodage : H.264 ≤720p, CRF 28, faststart, AAC, coupé à 60 s max.
+        subprocess.run([
+            'ffmpeg', '-y', '-i', in_path,
+            '-t', '60',
+            '-vf', "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease,"
+                   "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+            '-c:a', 'aac', '-b:a', '96k',
+            '-movflags', '+faststart',
+            out_path,
+        ], check=True, capture_output=True, timeout=180)
+
+        # Poster (frame à 1 s) — best effort.
+        try:
+            subprocess.run([
+                'ffmpeg', '-y', '-ss', '1', '-i', out_path,
+                '-frames:v', '1', poster_path,
+            ], check=True, capture_output=True, timeout=60)
+        except subprocess.SubprocessError:
+            pass
+
+        def _store(local_path, key, content_type, field):
+            with open(local_path, 'rb') as fh:
+                buf = BytesIO(fh.read())
+            up = InMemoryUploadedFile(buf, field, key, content_type, buf.getbuffer().nbytes, None)
+            path = default_storage.save(key, up)
+            url = default_storage.url(path)
+            return request.build_absolute_uri(url) if url.startswith('/') else url
+
+        video_url = _store(out_path, f"products/videos/{_uuid.uuid4().hex}.mp4", 'video/mp4', 'FileField')
+
+        poster_url = ''
+        if os.path.exists(poster_path) and os.path.getsize(poster_path) > 0:
+            poster_url = _store(poster_path, f"products/videos/{_uuid.uuid4().hex}.webp", 'image/webp', 'ImageField')
+
+        return Response({'url': video_url, 'poster': poster_url}, status=201)
+
+    except subprocess.TimeoutExpired:
+        return Response({'error': "Traitement trop long, réessaie avec une vidéo plus courte."}, status=400)
+    except subprocess.CalledProcessError:
+        return Response({'error': "Vidéo illisible ou corrompue."}, status=400)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 # ── Mes produits (liste fournisseur) ──────────────────────────────
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

@@ -300,7 +300,7 @@ class ProductCreateSerializer(serializers.ModelSerializer):
         model  = Product
         fields = [
             'id', 'category', 'name', 'description', 'unit',
-            'brand', 'reference', 'specs_raw', 'video_url',
+            'brand', 'reference', 'specs_raw', 'video_url', 'video_poster_url',
             'in_stock', 'delivery_days',
             'shipping_mode', 'shipping_price_tnd',
             'shipping_block_size', 'shipping_block_price',

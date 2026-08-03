@@ -20,6 +20,7 @@ urlpatterns = [
     # ── Espace fournisseur (routes statiques AVANT <uuid:pk>) ──
     path('create/',       views.create_product,       name='product-create'),
     path('upload-image/', views.upload_product_image, name='product-upload-image'),
+    path('upload-video/', views.upload_product_video),
     path('mine/',         views.my_products,          name='product-mine'),
 
     # ── Détail produit (UUID) — doit rester en dernier ──
