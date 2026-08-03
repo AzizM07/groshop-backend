@@ -1,6 +1,8 @@
+# users/urls.py
 from django.urls import path
 from . import views
 from . import social_auth
+from . import phone_verify
 
 urlpatterns = [
     path('register/buyer/',                 views.register_buyer,    name='register-buyer'),
@@ -19,8 +21,15 @@ urlpatterns = [
     path('addresses/<uuid:pk>/',          views.address_detail,       name='address_detail'),
     path('addresses/<uuid:pk>/default/',  views.address_set_default,  name='address_set_default'),
 
+    # ── Vérification du téléphone (OTP) ──
+    path('phone/request-otp/', phone_verify.request_phone_otp, name='phone-request-otp'),
+    path('phone/verify-otp/',  phone_verify.verify_phone_otp,  name='phone-verify-otp'),
+
     path('facebook/token/',          social_auth.facebook_token,  name='facebook-token'),
 
+    # ⚠️ Ces deux routes génériques doivent rester EN DERNIER : <str:provider>
+    #    matche n'importe quel segment, donc toute route spécifique (phone/, facebook/…)
+    #    doit être déclarée avant, sinon elle serait avalée par 'provider'.
     path('<str:provider>/start/',    social_auth.social_start),
     path('<str:provider>/callback/', social_auth.social_callback),
 ]

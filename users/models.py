@@ -30,17 +30,19 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('admin',    'Administrateur'),
     ]
 
-    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    email       = models.EmailField(unique=True)
-    phone       = models.CharField(max_length=20, blank=True)
-    full_name   = models.CharField(max_length=150)
-    avatar_url  = models.TextField(blank=True)
-    role        = models.CharField(max_length=20, choices=ROLES, default='buyer')
-    is_verified = models.BooleanField(default=False)
-    is_active   = models.BooleanField(default=True)
-    is_staff    = models.BooleanField(default=False)
-    created_at  = models.DateTimeField(auto_now_add=True)
-    updated_at  = models.DateTimeField(auto_now=True)
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email          = models.EmailField(unique=True)
+    phone          = models.CharField(max_length=20, blank=True)
+    phone_verified = models.BooleanField(default=False)
+    full_name      = models.CharField(max_length=150)
+    avatar_url     = models.TextField(blank=True)
+    role           = models.CharField(max_length=20, choices=ROLES, default='buyer')
+    is_verified    = models.BooleanField(default=False)
+    is_active      = models.BooleanField(default=True)
+    is_staff       = models.BooleanField(default=False)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+    last_seen      = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD  = 'email'
     REQUIRED_FIELDS = ['full_name']
@@ -52,8 +54,6 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f'{self.full_name} ({self.email})'
-
-    last_seen = models.DateTimeField(null=True, blank=True)
 
     @property
     def is_online(self):
@@ -202,3 +202,38 @@ class Address(models.Model):
         parts.append(self.postal_code)
         parts.append(self.country)
         return ', '.join(p for p in parts if p)
+
+
+# ══════════════════════════════════════════════════════════════════
+# BANNEDPHONE — numéros de téléphone bloqués
+# ══════════════════════════════════════════════════════════════════
+class BannedPhone(models.Model):
+    phone     = models.CharField(max_length=20, unique=True)
+    reason    = models.CharField(max_length=255, blank=True)
+    banned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'banned_phones'
+
+    def __str__(self):
+        return self.phone
+
+
+# ══════════════════════════════════════════════════════════════════
+# PHONEOTP — codes de vérification par SMS
+# ══════════════════════════════════════════════════════════════════
+class PhoneOTP(models.Model):
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='phone_otps')
+    phone      = models.CharField(max_length=20)
+    code       = models.CharField(max_length=6)
+    attempts   = models.PositiveSmallIntegerField(default=0)
+    consumed   = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'phone_otps'
+        indexes = [models.Index(fields=['user', 'phone', 'consumed'])]
+
+    def __str__(self):
+        return f'OTP {self.phone} ({"consommé" if self.consumed else "actif"})'
