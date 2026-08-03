@@ -4,7 +4,8 @@ from django.utils.text import slugify
 from django.db.models import Avg, Count, F, Exists, OuterRef, Q
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
-
+from django.core.files.uploadedfile import InMemoryUploadedFile
+import sys
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -692,20 +693,27 @@ def upload_product_image(request):
     # ── Optimisation : resize + conversion WebP ──
     img = Image.open(f)
     img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
-    img.thumbnail((1200, 1200))  # garde le ratio, limite la plus grande dimension
+    img.thumbnail((1200, 1200))
 
     buffer = BytesIO()
     img.save(buffer, format='WEBP', quality=80)
     buffer.seek(0)
 
-    key  = f"products/{_uuid.uuid4().hex}.webp"
-    path = default_storage.save(key, ContentFile(buffer.read()))
-    url  = default_storage.url(path)
+    key = f"products/{_uuid.uuid4().hex}.webp"
+
+    # InMemoryUploadedFile expose content_type explicitement, contrairement à
+    # ContentFile — nécessaire pour que le storage (Supabase/S3) envoie le bon
+    # Content-Type au lieu de retomber sur application/octet-stream.
+    upload_file = InMemoryUploadedFile(
+        buffer, 'ImageField', key, 'image/webp',
+        buffer.getbuffer().nbytes, None
+    )
+
+    path = default_storage.save(key, upload_file)
+    url = default_storage.url(path)
     if url.startswith('/'):
         url = request.build_absolute_uri(url)
     return Response({'url': url}, status=201)
-
-
 # ── Mes produits (liste fournisseur) ──────────────────────────────
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
