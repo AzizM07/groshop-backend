@@ -72,7 +72,8 @@ class Product(models.Model):
     updated_at     = models.DateTimeField(auto_now=True)
     old_price_tnd    = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)  # auto = solde 1re tranche
     is_free_shipping = models.BooleanField(default=False)           # dérivé de shipping_mode == 'free'
-
+    video_url         = models.TextField(blank=True)
+    video_poster_url  = models.TextField(blank=True, default='')   # ← miniature générée au transcodage
     brand      = models.CharField(max_length=100, blank=True, default='')
     reference  = models.CharField(max_length=100, blank=True, default='')  # code fabricant
     pack_size  = models.PositiveIntegerField(default=1)            # legacy — plus dans le form
