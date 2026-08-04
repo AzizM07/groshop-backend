@@ -1,7 +1,7 @@
 import json
 import os
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, exceptions
 from django.conf import settings
 
 _app = None
@@ -11,12 +11,31 @@ def _get_app():
     global _app
     if _app is not None:
         return _app
+
     raw = settings.FIREBASE_CREDENTIALS
     if not raw:
         raise RuntimeError('FIREBASE_CREDENTIALS manquant (settings/env).')
-    cred = credentials.Certificate(raw if os.path.exists(raw) else json.loads(raw))
+
+    # Accepte 3 formes : dict déjà parsé, JSON en texte, ou chemin de fichier.
+    if isinstance(raw, dict):
+        cred = credentials.Certificate(raw)
+    elif raw.strip().startswith('{'):
+        cred = credentials.Certificate(json.loads(raw))
+    elif os.path.exists(raw):
+        cred = credentials.Certificate(raw)
+    else:
+        raise RuntimeError('FIREBASE_CREDENTIALS invalide : ni JSON, ni chemin existant.')
+
     _app = firebase_admin.initialize_app(cred)
     return _app
+
+
+def _is_dead_token(exc):
+    """True si le token doit être supprimé (désenregistré / introuvable)."""
+    if isinstance(exc, messaging.UnregisteredError):
+        return True
+    code = getattr(exc, 'code', '')
+    return code == 'NOT_FOUND' or 'not-registered' in str(exc).lower()
 
 
 def send_to_tokens(tokens, title, body, image=None, link=None):
@@ -29,9 +48,7 @@ def send_to_tokens(tokens, title, body, image=None, link=None):
     success = failure = 0
     invalid = []
 
-    data = {}
-    if link:
-        data['link'] = link
+    data = {'link': link} if link else {}
 
     webpush = messaging.WebpushConfig(
         notification=messaging.WebpushNotification(
@@ -53,7 +70,7 @@ def send_to_tokens(tokens, title, body, image=None, link=None):
         success += resp.success_count
         failure += resp.failure_count
         for idx, r in enumerate(resp.responses):
-            if not r.success and 'not-registered' in str(r.exception).lower():
+            if not r.success and _is_dead_token(r.exception):
                 invalid.append(chunk[idx])
 
     return {'success': success, 'failure': failure, 'invalid': invalid}
