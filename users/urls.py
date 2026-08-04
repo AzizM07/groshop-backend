@@ -1,4 +1,3 @@
-# users/urls.py
 from django.urls import path
 from . import views
 from . import social_auth
@@ -14,9 +13,15 @@ urlpatterns = [
     path('me/',                             views.me,                name='me'),
     path('logout/',                         views.logout,            name='logout'),
     path('google/',                         views.google_one_tap,    name='google-one-tap'),
-    path('supplier/me/',                    views.supplier_me,       name='supplier-me'),
+
+    # ── Espace fournisseur (vitrine) ──
+    path('supplier/me/',                    views.supplier_me,           name='supplier-me'),
+    path('supplier/store/',                 views.supplier_update_store, name='supplier-update-store'),
+    path('supplier/store/upload/',          views.supplier_store_upload, name='supplier-store-upload'),
+
     path('suppliers/<slug:slug>/',          views.supplier_public,   name='supplier-public'),
     path('suppliers/<slug:slug>/products/', views.supplier_products, name='supplier-products'),
+
     path('addresses/',                    views.addresses_list,       name='addresses_list'),
     path('addresses/<uuid:pk>/',          views.address_detail,       name='address_detail'),
     path('addresses/<uuid:pk>/default/',  views.address_set_default,  name='address_set_default'),

@@ -141,10 +141,23 @@ class SupplierStore(models.Model):
     banner_url        = models.TextField(blank=True)
     description       = models.TextField(blank=True)
     founded_year      = models.IntegerField(null=True, blank=True)
-    certifications    = models.TextField(blank=True)
+    certifications    = models.TextField(blank=True)   # CSV "ISO 9001, OEKO-TEX" — le front splitte
     page_views        = models.IntegerField(default=0)
     response_rate     = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     response_time_hrs = models.IntegerField(null=True, blank=True)
+
+    # ── Vitrine (contenu éditable par le fournisseur) ──────────────
+    #    Tous NOUVEAUX champs → migration purement additive.
+    hero_title         = models.TextField(blank=True, default='')
+    stats_title        = models.TextField(blank=True, default='')
+    stats_description  = models.TextField(blank=True, default='')
+    highlight_image_1  = models.TextField(blank=True, default='')
+    highlight_image_2  = models.TextField(blank=True, default='')
+    about_title_main   = models.CharField(max_length=200, blank=True, default='')
+    about_title_accent = models.CharField(max_length=200, blank=True, default='')
+    about_image_url    = models.TextField(blank=True, default='')
+    about_images       = models.JSONField(default=list, blank=True)   # liste d'URLs
+    mission            = models.TextField(blank=True, default='')
 
     created_at        = models.DateTimeField(auto_now_add=True)
     updated_at        = models.DateTimeField(auto_now=True)

@@ -83,14 +83,46 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'email', 'full_name', 'phone', 'avatar_url', 'role', 'is_verified', 'created_at']
 
 
+# ── Store (lecture) ───────────────────────────────────────────────
+# Tous les champs de vitrine sont exposés → supplier_public ET supplier_me
+# renvoient de quoi peindre la vitrine complète.
+STORE_FIELDS = [
+    'logo_url', 'banner_url', 'description',
+    'founded_year', 'certifications',
+    'page_views', 'response_rate', 'response_time_hrs',
+    'hero_title', 'stats_title', 'stats_description',
+    'highlight_image_1', 'highlight_image_2',
+    'about_title_main', 'about_title_accent', 'about_image_url', 'about_images',
+    'mission',
+]
+
+
 class SupplierStoreSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = SupplierStore
+        fields = STORE_FIELDS
+
+
+# ── Store (écriture — édition par le fournisseur connecté) ─────────
+# page_views n'est PAS éditable (compteur serveur). Tout est optionnel
+# (partial=True côté vue) → le fournisseur PATCH un champ à la fois.
+class SupplierStoreWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = SupplierStore
         fields = [
             'logo_url', 'banner_url', 'description',
             'founded_year', 'certifications',
-            'page_views', 'response_rate', 'response_time_hrs'
+            'response_rate', 'response_time_hrs',
+            'hero_title', 'stats_title', 'stats_description',
+            'highlight_image_1', 'highlight_image_2',
+            'about_title_main', 'about_title_accent', 'about_image_url', 'about_images',
+            'mission',
         ]
+
+    def validate_about_images(self, value):
+        if not isinstance(value, list):
+            raise serializers.ValidationError("about_images doit être une liste d'URLs.")
+        return [str(v) for v in value if v]
 
 
 class SupplierPublicSerializer(serializers.ModelSerializer):

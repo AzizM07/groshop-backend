@@ -186,19 +186,22 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     shipping_tiers = ProductShippingTierSerializer(many=True, read_only=True)
     variants       = ProductVariantSerializer(many=True, read_only=True)
     choice_groups  = ProductChoiceGroupSerializer(many=True, read_only=True)
-    variant_combos = ProductVariantComboSerializer(many=True, read_only=True)   # ← AJOUT
+    variant_combos = ProductVariantComboSerializer(many=True, read_only=True)
     specs          = serializers.SerializerMethodField()
     is_favorited   = serializers.SerializerMethodField()
 
-    supplier_name         = serializers.CharField(source='supplier.company_name', read_only=True)
-    supplier_slug         = serializers.CharField(source='supplier.slug', read_only=True)
-    supplier_logo         = serializers.CharField(source='supplier.store.logo_url', read_only=True)
-    supplier_banner       = serializers.CharField(source='supplier.store.banner_url', read_only=True)
-    supplier_rating       = serializers.DecimalField(source='supplier.rating_avg', max_digits=3, decimal_places=2, read_only=True)
-    supplier_rating_count = serializers.IntegerField(source='supplier.rating_count', read_only=True)
-    supplier_city         = serializers.CharField(source='supplier.city', read_only=True)
-    supplier_wilaya       = serializers.CharField(source='supplier.wilaya', read_only=True)
-    supplier_verified     = serializers.CharField(source='supplier.verification_status', read_only=True)
+    # ── Champs du fournisseur (plats) ──
+    supplier_name         = serializers.CharField(source='supplier.company_name', read_only=True, default='')
+    supplier_slug         = serializers.CharField(source='supplier.slug', read_only=True, default='')
+    supplier_city         = serializers.CharField(source='supplier.city', read_only=True, default='')
+    supplier_wilaya       = serializers.CharField(source='supplier.wilaya', read_only=True, default='')
+    supplier_verified     = serializers.CharField(source='supplier.verification_status', read_only=True, default='pending')
+    supplier_rating       = serializers.DecimalField(source='supplier.rating_avg', max_digits=3, decimal_places=2, read_only=True, default=0)
+    supplier_rating_count = serializers.IntegerField(source='supplier.rating_count', read_only=True, default=0)
+
+    # ── Logo et bannière (avec fallback si store n'existe pas) ──
+    supplier_logo   = serializers.SerializerMethodField()
+    supplier_banner = serializers.SerializerMethodField()
 
     category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True, default=None)
     category_slug = serializers.CharField(source='category.slug', read_only=True, allow_null=True, default=None)
@@ -242,6 +245,25 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return False
         return obj.favorited_by.filter(user=request.user).exists()
+
+    # ── Méthodes pour le logo / bannière ──
+    def _get_store(self, obj):
+        # getattr(..., None) neutralise RelatedObjectDoesNotExist quand
+        # le fournisseur n'a pas encore de ligne SupplierStore.
+        if obj.supplier_id:
+            return getattr(obj.supplier, 'store', None)
+        return None
+
+    def get_supplier_logo(self, obj):
+        # ⚠️ SupplierStore ne porte QUE logo_url (pas de brand_logo_url / logo).
+        #    Référencer un champ inexistant lèverait AttributeError → 500.
+        store = self._get_store(obj)
+        return (store.logo_url or '') if store else ''
+
+    def get_supplier_banner(self, obj):
+        # ⚠️ SupplierStore ne porte QUE banner_url (pas de banner).
+        store = self._get_store(obj)
+        return (store.banner_url or '') if store else ''
 
 
 # ── Review ────────────────────────────────────────────────────────

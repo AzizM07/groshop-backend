@@ -12,16 +12,22 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.utils.text import slugify
 from django.db import transaction, IntegrityError
+from django.db.models import F
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import InMemoryUploadedFile
+from io import BytesIO
 from .serializers import (
     RegisterBuyerSerializer, RegisterSupplierSerializer, UserSerializer,
-    SupplierPublicSerializer, AddressSerializer,
+    SupplierPublicSerializer, SupplierStoreSerializer, SupplierStoreWriteSerializer,
+    AddressSerializer,
 )
 from .models import User, SupplierProfile, SupplierStore, Address
 from decouple import config
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
+
+from PIL import Image
 
 GOOGLE_CLIENT_ID = config('GOOGLE_CLIENT_ID')
 
@@ -197,8 +203,9 @@ def supplier_public(request, slug):
     except SupplierProfile.DoesNotExist:
         return Response({'error': 'Fournisseur non trouvé.'}, status=404)
 
+    # ⚡ Incrément atomique (F) : plus de read-then-write sujet aux races.
     if hasattr(supplier, 'store'):
-        SupplierStore.objects.filter(supplier=supplier).update(page_views=supplier.store.page_views + 1)
+        SupplierStore.objects.filter(supplier=supplier).update(page_views=F('page_views') + 1)
 
     return Response(SupplierPublicSerializer(supplier).data)
 
@@ -214,11 +221,29 @@ def supplier_products(request, slug):
     from products.models import Product
     from products.serializers import ProductListSerializer
 
-    products = Product.objects.filter(supplier=supplier, status='approved').prefetch_related('images').order_by('-sold_count')
+    # ⚡ select_related supplier + supplier__store (years_active) + category,
+    #    prefetch images + price_tiers → 0 N+1 dans ProductListSerializer.
+    products = (
+        Product.objects
+        .filter(supplier=supplier, status='approved')
+        .select_related('supplier', 'supplier__store', 'category')
+        .prefetch_related('images', 'price_tiers')
+        .order_by('-sold_count')
+    )
 
     category = request.query_params.get('category')
     if category:
         products = products.filter(category__slug=category)
+
+    # page_size optionnel : le catalogue passe 200, la vitrine passe 12.
+    # Absent → on renvoie tout (comportement historique préservé).
+    page_size = request.query_params.get('page_size')
+    if page_size:
+        try:
+            n = max(1, min(int(page_size), 200))
+            products = products[:n]
+        except (TypeError, ValueError):
+            pass
 
     return Response(ProductListSerializer(products, many=True).data)
 
@@ -316,6 +341,78 @@ def supplier_me(request):
         return Response({'error': 'Profil fournisseur non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
 
     return Response(SupplierPublicSerializer(supplier).data)
+
+
+# ── Supplier store (PATCH : édition de la vitrine) ────────────────
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def supplier_update_store(request):
+    """
+    PATCH /api/auth/supplier/store/
+    Le fournisseur connecté met à jour un ou plusieurs champs de sa
+    vitrine. Le store est créé s'il n'existe pas encore. Les clés
+    inconnues (ex. brand_logo_url) sont ignorées par le serializer.
+    """
+    if request.user.role != 'supplier':
+        return Response({'error': 'Accès réservé aux fournisseurs.'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        supplier = SupplierProfile.objects.get(user=request.user)
+    except SupplierProfile.DoesNotExist:
+        return Response({'error': 'Profil fournisseur non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
+
+    store, _ = SupplierStore.objects.get_or_create(supplier=supplier)
+
+    ser = SupplierStoreWriteSerializer(store, data=request.data, partial=True)
+    ser.is_valid(raise_exception=True)
+    ser.save()
+
+    # On renvoie la vitrine complète (lecture) pour resynchroniser le front.
+    return Response(SupplierStoreSerializer(store).data)
+
+
+# ── Upload image vitrine (logo / bannière / highlight / about) ────
+STORE_IMG_TYPES = {'image/png', 'image/jpeg', 'image/jpg', 'image/webp'}
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def supplier_store_upload(request):
+    """
+    POST /api/auth/supplier/store/upload/  (multipart, champ 'file')
+    Optimise en WebP et renvoie {url}. Le front PATCH ensuite le champ
+    concerné avec cette URL (même contrat que l'upload image produit).
+    """
+    if request.user.role != 'supplier':
+        return Response({'error': 'Accès réservé aux fournisseurs.'}, status=status.HTTP_403_FORBIDDEN)
+
+    f = request.FILES.get('file')
+    if not f:
+        return Response({'error': 'Aucun fichier.'}, status=400)
+    if f.content_type not in STORE_IMG_TYPES:
+        return Response({'error': 'Format non supporté (png, jpg, jpeg, webp).'}, status=400)
+    if f.size > 5 * 1024 * 1024:
+        return Response({'error': 'Fichier trop volumineux (max 5 Mo).'}, status=400)
+
+    # Resize (bannières jusqu'à 1600px de large) + conversion WebP.
+    img = Image.open(f)
+    img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+    img.thumbnail((1600, 1600))
+
+    buffer = BytesIO()
+    img.save(buffer, format='WEBP', quality=82)
+    buffer.seek(0)
+
+    key = f"suppliers/store/{uuid.uuid4().hex}.webp"
+    upload_file = InMemoryUploadedFile(
+        buffer, 'ImageField', key, 'image/webp', buffer.getbuffer().nbytes, None
+    )
+    path = default_storage.save(key, upload_file)
+    url  = default_storage.url(path)
+    if url.startswith('/'):
+        url = request.build_absolute_uri(url)
+    return Response({'url': url}, status=201)
 
 
 # ══════════════════════════════════════════════════════════════════

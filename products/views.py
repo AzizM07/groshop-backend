@@ -23,6 +23,22 @@ from PIL import Image
 from io import BytesIO
 
 
+# ══════════════════════════════════════════════════════════════════
+#  ⚡ Base querysets réutilisables — TOUT ce que ProductListSerializer
+#     lit sans requête supplémentaire (0 N+1) :
+#       select_related : supplier, supplier__store (years_active), category
+#       prefetch       : images (primary_image), price_tiers
+#     ProductListSerializer expose price_tiers → sans ce prefetch, chaque
+#     carte relance une requête. C'est LE correctif perf principal.
+# ══════════════════════════════════════════════════════════════════
+def _list_queryset():
+    return (
+        Product.objects
+        .select_related('supplier', 'supplier__store', 'category')
+        .prefetch_related('images', 'price_tiers')
+    )
+
+
 # ── Categories ────────────────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
@@ -344,22 +360,18 @@ def recommended_products(request):
         ]
 
         if category_ids:
-            products = Product.objects.filter(
+            products = _list_queryset().filter(
                 status='approved',
                 category_id__in=category_ids,
-            ).select_related(
-                'supplier', 'supplier__store', 'category'
-            ).prefetch_related('images').order_by('-sold_count')[:30]
+            ).order_by('-sold_count')[:30]
 
             if products.exists():
                 serializer = ProductListSerializer(products, many=True)
                 return Response({'results': serializer.data, 'personalized': True})
 
-    products = Product.objects.filter(
+    products = _list_queryset().filter(
         status='approved'
-    ).select_related(
-        'supplier', 'supplier__store', 'category'
-    ).prefetch_related('images').order_by('-sold_count')[:30]
+    ).order_by('-sold_count')[:30]
 
     serializer = ProductListSerializer(products, many=True)
     return Response({'results': serializer.data, 'personalized': False})
@@ -395,11 +407,9 @@ def search_suggestions(request):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def trending_products(request):
-    products = Product.objects.filter(
+    products = _list_queryset().filter(
         status='approved'
-    ).select_related(
-        'supplier', 'supplier__store', 'category'
-    ).prefetch_related('images').order_by(
+    ).order_by(
         '-badge_flash', '-rating_avg', '-sold_count'
     )[:15]
     serializer = ProductListSerializer(products, many=True)
@@ -411,11 +421,7 @@ def trending_products(request):
 @permission_classes([AllowAny])
 def products_list(request):
 
-    products = Product.objects.filter(
-        status='approved'
-    ).select_related(
-        'supplier', 'supplier__store', 'category'
-    ).prefetch_related('images')
+    products = _list_queryset().filter(status='approved')
 
     category = request.query_params.get('category')
     if category:
@@ -467,7 +473,8 @@ def product_detail(request, pk):
     except Product.DoesNotExist:
         return Response({'error': 'Produit non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
 
-    Product.objects.filter(id=pk).update(view_count=product.view_count + 1)
+    # ⚡ Incrément atomique (F) : pas de race read-then-write entre requêtes.
+    Product.objects.filter(id=pk).update(view_count=F('view_count') + 1)
 
     if request.user.is_authenticated:
         from store.models import ProductInteraction
@@ -503,23 +510,21 @@ def search_products(request):
 
     if ids is not None:
         # 2) On recharge les produits complets depuis Postgres (pour la sérialisation)
-        products_qs = Product.objects.filter(
-            status='approved', id__in=ids,
-        ).select_related('supplier', 'supplier__store', 'category').prefetch_related('images')
+        products_qs = _list_queryset().filter(status='approved', id__in=ids)
 
         # 3) On respecte l'ordre de pertinence de Meilisearch
         by_id = {str(p.id): p for p in products_qs}
         products = [by_id[i] for i in ids if i in by_id]
     else:
         # Fallback : ancienne recherche Postgres si Meilisearch est éteint
-        products = list(Product.objects.filter(
+        products = list(_list_queryset().filter(
             status='approved'
         ).filter(
             Q(name__icontains=query) |
             Q(description__icontains=query) |
             Q(category__name__icontains=query) |
             Q(supplier__company_name__icontains=query)
-        ).select_related('supplier', 'supplier__store', 'category').prefetch_related('images').order_by('-sold_count')[:20])
+        ).order_by('-sold_count')[:20])
 
     if request.user.is_authenticated:
         from store.models import SearchHistory
@@ -540,11 +545,9 @@ def similar_products(request, pk):
     except Product.DoesNotExist:
         return Response({'error': 'Produit non trouvé.'}, status=404)
 
-    similar = Product.objects.filter(
+    similar = _list_queryset().filter(
         status='approved', category=product.category,
-    ).exclude(id=pk).select_related(
-        'supplier', 'category'
-    ).prefetch_related('images').order_by('-sold_count')[:10]
+    ).exclude(id=pk).order_by('-sold_count')[:10]
 
     serializer = ProductListSerializer(similar, many=True)
     return Response(serializer.data)
