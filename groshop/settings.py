@@ -264,7 +264,7 @@ else:
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Clé de service Firebase : soit un chemin de fichier, soit le JSON complet (Render → variable d'env)
-FIREBASE_CREDENTIALS = os.environ.get('FIREBASE_CREDENTIALS', '')
+FIREBASE_CREDENTIALS = config('FIREBASE_CREDENTIALS', default='')
 # ═══════════════════════════════════════════════════════════════════
 # LOCALIZATION
 # ═══════════════════════════════════════════════════════════════════

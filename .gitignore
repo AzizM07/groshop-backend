@@ -63,3 +63,4 @@ logs/
 *.tmp
 *.bak
 meilisearch.exe
+firebase-service-account.json
