@@ -5,7 +5,9 @@ import uuid as _uuid
 from .models import (
     Category, Product, ProductImage, ProductPriceTier,
     ProductShippingTier,
-    ProductChoiceGroup, ProductVariant, Review, ReviewPhoto,
+    ProductChoiceGroup, ProductVariant,
+    ProductVariantCombo, ProductComboPriceTier,
+    Review, ReviewPhoto,
 )
 
 
@@ -81,11 +83,32 @@ class ProductChoiceGroupSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'sort_order', 'variants']
 
 
+# ── ProductComboPriceTier ─────────────────────────────────────────
+class ProductComboPriceTierSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = ProductComboPriceTier
+        fields = ['id', 'min_qty', 'max_qty', 'price_tnd', 'old_price_tnd']
+
+
+# ── ProductVariantCombo ───────────────────────────────────────────
+class ProductVariantComboSerializer(serializers.ModelSerializer):
+    variant_ids = serializers.SerializerMethodField()
+    price_tiers = ProductComboPriceTierSerializer(many=True, read_only=True)
+
+    class Meta:
+        model  = ProductVariantCombo
+        fields = ['id', 'variant_ids', 'price_tiers']
+
+    def get_variant_ids(self, obj):
+        # ⚡ .all() → cache du prefetch_related('variant_combos__variants'), 0 requête
+        return [str(v.id) for v in obj.variants.all()]
+
+
 # ── Product List (carte) ──────────────────────────────────────────
 class ProductListSerializer(serializers.ModelSerializer):
 
     primary_image     = serializers.SerializerMethodField()
-    images            = ProductImageSerializer(many=True, read_only=True)
+    images            = ProductImageSerializer(many=True, read_only=True)   # ← AJOUT
     supplier_name     = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug     = serializers.CharField(source='supplier.slug', read_only=True)
     supplier_verified = serializers.CharField(source='supplier.verification_status', read_only=True)
@@ -100,11 +123,11 @@ class ProductListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'slug',
             'base_price_tnd', 'old_price_tnd',
-            'moq', 'unit', 'in_stock',
+            'moq', 'unit', 'in_stock',                                      # ← in_stock
             'sold_count', 'rating_avg', 'rating_count',
             'badge_choice', 'badge_flash', 'badge_flash_end',
             'is_free_shipping',
-            'primary_image', 'images',
+            'primary_image', 'images',                                      # ← AJOUT
             'supplier_name', 'supplier_slug', 'supplier_verified', 'supplier_medals',
             'category_name',
             'years_active',
@@ -158,13 +181,14 @@ class CategorySerializer(serializers.ModelSerializer):
 # ── Product Detail (page produit) ─────────────────────────────────
 class ProductDetailSerializer(serializers.ModelSerializer):
 
-    images        = ProductImageSerializer(many=True, read_only=True)
-    price_tiers   = ProductPriceTierSerializer(many=True, read_only=True)
-    shipping_tiers= ProductShippingTierSerializer(many=True, read_only=True)
-    variants      = ProductVariantSerializer(many=True, read_only=True)
-    choice_groups = ProductChoiceGroupSerializer(many=True, read_only=True)
-    specs         = serializers.SerializerMethodField()
-    is_favorited  = serializers.SerializerMethodField()
+    images         = ProductImageSerializer(many=True, read_only=True)
+    price_tiers    = ProductPriceTierSerializer(many=True, read_only=True)
+    shipping_tiers = ProductShippingTierSerializer(many=True, read_only=True)
+    variants       = ProductVariantSerializer(many=True, read_only=True)
+    choice_groups  = ProductChoiceGroupSerializer(many=True, read_only=True)
+    variant_combos = ProductVariantComboSerializer(many=True, read_only=True)   # ← AJOUT
+    specs          = serializers.SerializerMethodField()
+    is_favorited   = serializers.SerializerMethodField()
 
     supplier_name         = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug         = serializers.CharField(source='supplier.slug', read_only=True)
@@ -183,8 +207,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         model  = Product
         fields = [
             'id', 'name', 'slug', 'description', 'sku', 'unit',
-            'moq', 'base_price_tnd', 'old_price_tnd',
-            'video_url', 'video_poster_url',
+            'moq', 'base_price_tnd', 'old_price_tnd', 'video_url',
             'in_stock', 'sold_count', 'view_count',
             'rating_avg', 'rating_count',
             'status', 'badge_choice', 'badge_flash', 'badge_flash_end',
@@ -192,7 +215,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'brand', 'reference', 'pack_size',
             'shipping_mode', 'shipping_price_tnd', 'shipping_block_size',
             'shipping_block_price', 'shipping_tiers', 'delivery_days',
-            'images', 'price_tiers', 'variants', 'choice_groups', 'specs',
+            'images', 'price_tiers', 'variants', 'choice_groups', 'variant_combos', 'specs',
             'supplier_name', 'supplier_slug', 'supplier_logo', 'supplier_banner',
             'supplier_rating', 'supplier_rating_count',
             'supplier_city', 'supplier_wilaya', 'supplier_verified',
@@ -291,11 +314,31 @@ class _ChoiceGroupWrite(serializers.ModelSerializer):
         fields = ['name', 'sort_order', 'variants']
 
 
+class _ComboPriceTierWrite(serializers.ModelSerializer):
+    old_price_tnd = serializers.DecimalField(max_digits=10, decimal_places=3,
+                                             required=False, allow_null=True)
+
+    class Meta:
+        model  = ProductComboPriceTier
+        fields = ['min_qty', 'price_tnd', 'old_price_tnd']   # max_qty calculé serveur
+
+
+class _ComboSelectionWrite(serializers.Serializer):
+    group   = serializers.CharField(max_length=50)
+    variant = serializers.CharField(max_length=50)
+
+
+class _VariantComboWrite(serializers.Serializer):
+    selections  = _ComboSelectionWrite(many=True)
+    price_tiers = _ComboPriceTierWrite(many=True)
+
+
 class ProductCreateSerializer(serializers.ModelSerializer):
     images         = _ImageWrite(many=True, required=False)
     price_tiers    = _TierWrite(many=True)
     shipping_tiers = _ShippingTierWrite(many=True, required=False)
     choice_groups  = _ChoiceGroupWrite(many=True, required=False)
+    variant_combos = _VariantComboWrite(many=True, required=False)   # ← AJOUT
 
     class Meta:
         model  = Product
@@ -305,7 +348,7 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             'in_stock', 'delivery_days',
             'shipping_mode', 'shipping_price_tnd',
             'shipping_block_size', 'shipping_block_price',
-            'status', 'images', 'price_tiers', 'shipping_tiers', 'choice_groups',
+            'status', 'images', 'price_tiers', 'shipping_tiers', 'choice_groups', 'variant_combos',
         ]
         read_only_fields = ['id']
         # base_price_tnd, old_price_tnd, moq, is_free_shipping : dérivés dans create()
@@ -368,6 +411,7 @@ class ProductCreateSerializer(serializers.ModelSerializer):
         tiers      = validated_data.pop('price_tiers', [])
         ship_tiers = validated_data.pop('shipping_tiers', [])
         groups     = validated_data.pop('choice_groups', [])
+        combos     = validated_data.pop('variant_combos', [])   # ← AJOUT
 
         tiers = sorted(tiers, key=lambda t: t['min_qty'])
         # Bornes hautes auto : jusqu'à (tranche suivante − 1), dernière = ouverte (null)
@@ -396,13 +440,43 @@ class ProductCreateSerializer(serializers.ModelSerializer):
                 for t in sorted(ship_tiers, key=lambda x: x['min_qty'])
             ])
 
+        # ── Groupes + variantes, avec lookup (nom_groupe, nom_variante) → instance ──
+        variant_lookup = {}
         for gi, g in enumerate(groups):
             variants = g.pop('variants', [])
             group = ProductChoiceGroup.objects.create(
                 product=product, name=g['name'], sort_order=g.get('sort_order', gi),
             )
-            ProductVariant.objects.bulk_create([
+            created_variants = ProductVariant.objects.bulk_create([
                 ProductVariant(product=product, group=group, **v) for v in variants
+            ])
+            for v in created_variants:
+                variant_lookup[(g['name'], v.name)] = v
+
+        # ── Prix par combinaison de variantes (optionnel) ──────────────
+        for c in combos:
+            selections  = c.get('selections') or []
+            combo_tiers = c.get('price_tiers') or []
+            if not selections or not combo_tiers:
+                continue
+
+            variant_instances = [
+                variant_lookup[(s['group'], s['variant'])]
+                for s in selections
+                if (s['group'], s['variant']) in variant_lookup
+            ]
+            if len(variant_instances) != len(selections):
+                continue  # sélection incomplète/invalide → ignorée silencieusement
+
+            combo_tiers = sorted(combo_tiers, key=lambda t: t['min_qty'])
+            for i, t in enumerate(combo_tiers):
+                t['max_qty'] = (combo_tiers[i + 1]['min_qty'] - 1) if i + 1 < len(combo_tiers) else None
+
+            combo_key = '|'.join(sorted(str(v.id) for v in variant_instances))
+            combo = ProductVariantCombo.objects.create(product=product, combo_key=combo_key)
+            combo.variants.set(variant_instances)
+            ProductComboPriceTier.objects.bulk_create([
+                ProductComboPriceTier(combo=combo, **t) for t in combo_tiers
             ])
 
         return product
@@ -418,7 +492,7 @@ class SupplierProductSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Product
         fields = ['id', 'name', 'slug', 'base_price_tnd', 'old_price_tnd',
-                  'moq', 'unit', 'stock_qty', 'in_stock', 'sold_count',
+                  'moq', 'unit', 'stock_qty', 'in_stock', 'sold_count',   # ← in_stock ajouté
                   'rating_avg', 'rating_count', 'status',
                   'is_free_shipping', 'category_name', 'primary_image', 'created_at']
 
