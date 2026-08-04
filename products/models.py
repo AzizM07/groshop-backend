@@ -57,9 +57,8 @@ class Product(models.Model):
     unit           = models.CharField(max_length=50, blank=True)
     moq            = models.IntegerField()                          # auto = 1re tranche
     base_price_tnd = models.DecimalField(max_digits=10, decimal_places=3)  # auto = prix 1re tranche
-    video_url      = models.TextField(blank=True)
     stock_qty      = models.IntegerField(default=0)                 # legacy
-    in_stock       = models.BooleanField(default=True)             # ← nouveau : dispo on/off
+    in_stock       = models.BooleanField(default=True)             # dispo on/off
     sold_count     = models.IntegerField(default=0)
     view_count     = models.IntegerField(default=0)
     rating_avg     = models.DecimalField(max_digits=3, decimal_places=2, default=0)
@@ -72,8 +71,11 @@ class Product(models.Model):
     updated_at     = models.DateTimeField(auto_now=True)
     old_price_tnd    = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)  # auto = solde 1re tranche
     is_free_shipping = models.BooleanField(default=False)           # dérivé de shipping_mode == 'free'
+
+    # ── Vidéo (un seul champ url + son poster) ──
     video_url         = models.TextField(blank=True)
-    video_poster_url  = models.TextField(blank=True, default='')   # ← miniature générée au transcodage
+    video_poster_url  = models.TextField(blank=True, default='')   # miniature générée au transcodage
+
     brand      = models.CharField(max_length=100, blank=True, default='')
     reference  = models.CharField(max_length=100, blank=True, default='')  # code fabricant
     pack_size  = models.PositiveIntegerField(default=1)            # legacy — plus dans le form
@@ -124,7 +126,7 @@ class ProductPriceTier(models.Model):
     min_qty       = models.IntegerField()
     max_qty       = models.IntegerField(null=True, blank=True)      # calculé serveur (borne suivante-1, dernière = null)
     price_tnd     = models.DecimalField(max_digits=10, decimal_places=3)
-    old_price_tnd = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)  # ← solde par tranche
+    old_price_tnd = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)  # solde par tranche
 
     class Meta:
         db_table = 'product_price_tiers'
@@ -134,7 +136,7 @@ class ProductPriceTier(models.Model):
         return f'{self.product.name} | {self.min_qty}-{self.max_qty} → {self.price_tnd} TND'
 
 
-# ── ProductShippingTier (NOUVEAU) ─────────────────────────────────
+# ── ProductShippingTier ───────────────────────────────────────────
 class ProductShippingTier(models.Model):
     """Frais de livraison par tranche de quantité (mode 'tiered')."""
     id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -183,6 +185,44 @@ class ProductVariant(models.Model):
 
     def __str__(self):
         return f'{self.product.name} — {self.name}'
+
+
+# ── ProductVariantCombo (NOUVEAU) ─────────────────────────────────
+class ProductVariantCombo(models.Model):
+    """
+    Combinaison précise (une variante par groupe) avec SON PROPRE barème.
+    Optionnel : par défaut les combinaisons héritent du barème produit.
+    combo_key = ids de variantes triés, joints par '|', pour une résolution
+    O(1) au panier.
+    """
+    id        = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product   = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variant_combos')
+    variants  = models.ManyToManyField(ProductVariant, related_name='combos')
+    combo_key = models.CharField(max_length=300, db_index=True)
+
+    class Meta:
+        db_table = 'product_variant_combos'
+
+    def __str__(self):
+        return f'combo {self.combo_key} → {self.product_id}'
+
+
+# ── ProductComboPriceTier (NOUVEAU) ───────────────────────────────
+class ProductComboPriceTier(models.Model):
+    """Barème propre à une combinaison (mêmes règles que ProductPriceTier)."""
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    combo         = models.ForeignKey(ProductVariantCombo, on_delete=models.CASCADE, related_name='price_tiers')
+    min_qty       = models.IntegerField()
+    max_qty       = models.IntegerField(null=True, blank=True)
+    price_tnd     = models.DecimalField(max_digits=10, decimal_places=3)
+    old_price_tnd = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
+
+    class Meta:
+        db_table = 'product_combo_price_tiers'
+        ordering = ['min_qty']
+
+    def __str__(self):
+        return f'{self.combo_id} | {self.min_qty}+ → {self.price_tnd} TND'
 
 
 # ── Review ────────────────────────────────────────────────────────

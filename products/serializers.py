@@ -85,7 +85,7 @@ class ProductChoiceGroupSerializer(serializers.ModelSerializer):
 class ProductListSerializer(serializers.ModelSerializer):
 
     primary_image     = serializers.SerializerMethodField()
-    images            = ProductImageSerializer(many=True, read_only=True)   # ← AJOUT
+    images            = ProductImageSerializer(many=True, read_only=True)
     supplier_name     = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug     = serializers.CharField(source='supplier.slug', read_only=True)
     supplier_verified = serializers.CharField(source='supplier.verification_status', read_only=True)
@@ -100,11 +100,11 @@ class ProductListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'slug',
             'base_price_tnd', 'old_price_tnd',
-            'moq', 'unit', 'in_stock',                                      # ← in_stock
+            'moq', 'unit', 'in_stock',
             'sold_count', 'rating_avg', 'rating_count',
             'badge_choice', 'badge_flash', 'badge_flash_end',
             'is_free_shipping',
-            'primary_image', 'images',                                      # ← AJOUT
+            'primary_image', 'images',
             'supplier_name', 'supplier_slug', 'supplier_verified', 'supplier_medals',
             'category_name',
             'years_active',
@@ -183,7 +183,8 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         model  = Product
         fields = [
             'id', 'name', 'slug', 'description', 'sku', 'unit',
-            'moq', 'base_price_tnd', 'old_price_tnd', 'video_url',
+            'moq', 'base_price_tnd', 'old_price_tnd',
+            'video_url', 'video_poster_url',
             'in_stock', 'sold_count', 'view_count',
             'rating_avg', 'rating_count',
             'status', 'badge_choice', 'badge_flash', 'badge_flash_end',
@@ -417,7 +418,7 @@ class SupplierProductSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Product
         fields = ['id', 'name', 'slug', 'base_price_tnd', 'old_price_tnd',
-                  'moq', 'unit', 'stock_qty', 'in_stock', 'sold_count',   # ← in_stock ajouté
+                  'moq', 'unit', 'stock_qty', 'in_stock', 'sold_count',
                   'rating_avg', 'rating_count', 'status',
                   'is_free_shipping', 'category_name', 'primary_image', 'created_at']
 
