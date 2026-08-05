@@ -5,7 +5,7 @@
 #   → « délai moyen de livraison » n'est PAS calculable ici (voir admin_stats).
 
 from datetime import timedelta
-
+from store.models import SubscriptionPlan 
 from django.utils import timezone
 from django.db.models import Sum, Count, Q
 from django.core.paginator import Paginator
@@ -706,3 +706,82 @@ def admin_user_detail(request, user_id):
         pass
 
     return Response(data)
+# ──────────────────────────────────────────────────────────────────
+# Plans d'abonnement  (CRUD)
+# GET/POST          /api/admin/plans/
+# GET/PATCH/DELETE  /api/admin/plans/<uuid>/
+# SubscriptionPlan est déjà importé en haut du fichier.
+# ──────────────────────────────────────────────────────────────────
+def _plan_dict(p):
+    return {
+        'id':             str(p.id),
+        'name':           p.name,
+        'price_tnd':      str(p.price_tnd),
+        'commission_pct': str(p.commission_pct),
+        'max_products':   p.max_products,        # null = illimité
+        'features':       p.features or {},
+        'is_active':      p.is_active,
+        'created_at':     p.created_at.isoformat(),
+    }
+
+
+@api_view(['GET', 'POST'])
+@authentication_classes([CookieJWTAuthentication])
+@permission_classes([IsAdmin])
+def admin_plans(request):
+    if request.method == 'GET':
+        qs = SubscriptionPlan.objects.all().order_by('price_tnd')
+        active = request.GET.get('active')
+        if active in ('true', 'false'):
+            qs = qs.filter(is_active=(active == 'true'))
+        results = [_plan_dict(p) for p in qs]
+        return Response({'results': results, 'count': len(results)})
+
+    # POST → création
+    d = request.data
+    mp = d.get('max_products')
+    plan = SubscriptionPlan.objects.create(
+        name           = (d.get('name') or '').strip(),
+        price_tnd      = d.get('price_tnd') or 0,
+        commission_pct = d.get('commission_pct') or 0,
+        max_products   = mp if mp not in ('', None) else None,
+        features       = d.get('features') or {},
+        is_active      = d.get('is_active', True),
+    )
+    return Response(_plan_dict(plan), status=http_status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@authentication_classes([CookieJWTAuthentication])
+@permission_classes([IsAdmin])
+def admin_plan_detail(request, plan_id):
+    try:
+        plan = SubscriptionPlan.objects.get(id=plan_id)
+    except SubscriptionPlan.DoesNotExist:
+        return Response({'detail': 'Plan introuvable.'},
+                        status=http_status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response(_plan_dict(plan))
+
+    if request.method == 'DELETE':
+        # SupplierSubscription.plan = on_delete=PROTECT → refus propre si utilisé
+        from django.db.models import ProtectedError
+        try:
+            plan.delete()
+        except ProtectedError:
+            return Response(
+                {'detail': "Ce plan est utilisé par des abonnements — désactivez-le au lieu de le supprimer."},
+                status=http_status.HTTP_409_CONFLICT,
+            )
+        return Response(status=http_status.HTTP_204_NO_CONTENT)
+
+    # PATCH → mise à jour partielle
+    d = request.data
+    for f in ('name', 'price_tnd', 'commission_pct', 'is_active', 'features'):
+        if f in d:
+            setattr(plan, f, d[f])
+    if 'max_products' in d:
+        plan.max_products = d['max_products'] if d['max_products'] not in ('', None) else None
+    plan.save()
+    return Response(_plan_dict(plan))

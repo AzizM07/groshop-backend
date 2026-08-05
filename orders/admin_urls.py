@@ -27,6 +27,10 @@ urlpatterns = [
     # Paiements
     path('payments/',                            admin_views.admin_payments,          name='admin_payments'),
 
+    # Plans d'abonnement
+    path('plans/',                               admin_views.admin_plans,             name='admin_plans'),
+    path('plans/<uuid:plan_id>/',                admin_views.admin_plan_detail,       name='admin_plan_detail'),
+
     # Messagerie (surveillance)
     path('conversations/',                       admin_views.admin_conversations,       name='admin_conversations'),
     path('conversations/<uuid:conversation_id>/', admin_views.admin_conversation_detail, name='admin_conversation_detail'),
