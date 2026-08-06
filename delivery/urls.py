@@ -2,11 +2,12 @@
 # À inclure dans le urls racine : path("api/delivery/", include("delivery.urls"))
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import (CarrierListView, SupplierCarrierConfigViewSet,
-                    ShipmentViewSet, CarrierWebhookView)
+from .views import (CarrierProviderViewSet, CarrierListView,
+                    SupplierCarrierConfigViewSet, ShipmentViewSet, CarrierWebhookView)
 
 router = DefaultRouter()
-router.register("carrier-configs", SupplierCarrierConfigViewSet, basename="carrier-config")
+router.register("carrier-providers", CarrierProviderViewSet, basename="carrier-provider")  # admin
+router.register("carrier-configs", SupplierCarrierConfigViewSet, basename="carrier-config")  # fournisseur
 router.register("shipments", ShipmentViewSet, basename="shipment")
 
 urlpatterns = [

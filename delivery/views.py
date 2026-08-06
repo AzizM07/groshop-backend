@@ -1,8 +1,9 @@
 # delivery/views.py — GROSHOP.tn
 from rest_framework import viewsets, decorators, response, status, permissions
 from rest_framework.views import APIView
-from .models import SupplierCarrierConfig, Shipment
-from .serializers import SupplierCarrierConfigSerializer, ShipmentSerializer
+from .models import CarrierProvider, SupplierCarrierConfig, Shipment
+from .serializers import (CarrierProviderSerializer, SupplierCarrierConfigSerializer,
+                          ShipmentSerializer)
 from .carriers.registry import available_carriers
 from . import services
 
@@ -13,18 +14,44 @@ def _supplier_of(request):
         or getattr(request.user, "supplier", None)
 
 
+# ── Admin plateforme ───────────────────────────────────────────────
+class CarrierProviderViewSet(viewsets.ModelViewSet):
+    """Catalogue plateforme des transporteurs — admin GROSHOP UNIQUEMENT.
+    C'est ici que l'admin configure chaque société (compte maître + secrets)."""
+    queryset = CarrierProvider.objects.all()
+    serializer_class = CarrierProviderSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    @decorators.action(detail=False, methods=["get"])
+    def available_codes(self, request):
+        """Codes du registre pas encore ajoutés — pour le select « Ajouter »."""
+        used = set(CarrierProvider.objects.values_list("code", flat=True))
+        return response.Response(
+            [{"code": c, "label": l} for c, l in available_carriers() if c not in used]
+        )
+
+
+# ── Fournisseur / commun ───────────────────────────────────────────
 class CarrierListView(APIView):
-    """GET /api/delivery/carriers/ → transporteurs disponibles (pour le menu)."""
+    """GET /api/delivery/carriers/ → transporteurs proposables (pour le menu fournisseur).
+    Renvoie les CarrierProvider actifs ; à défaut, fallback sur le registre."""
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        providers = CarrierProvider.objects.filter(is_active=True)
+        if providers.exists():
+            return response.Response([
+                {"code": p.code, "label": p.name,
+                 "cod_supported": p.cod_supported, "logo_url": p.logo_url}
+                for p in providers
+            ])
         return response.Response(
             [{"code": c, "label": l} for c, l in available_carriers()]
         )
 
 
 class SupplierCarrierConfigViewSet(viewsets.ModelViewSet):
-    """CRUD des transporteurs activés par le fournisseur connecté."""
+    """CRUD des transporteurs activés par le fournisseur connecté (choix / défaut)."""
     serializer_class = SupplierCarrierConfigSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -66,7 +93,8 @@ class ShipmentViewSet(viewsets.ModelViewSet):
 
 class CarrierWebhookView(APIView):
     """POST /api/delivery/webhooks/<carrier_code>/ — MAJ de statut poussées.
-    ⚠️ Vérifie la signature du transporteur avant de faire confiance au payload."""
+    ⚠️ Vérifie la signature (webhook_secret du CarrierProvider) avant de faire
+    confiance au payload, puis idempotence sur l'id d'événement transporteur."""
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, carrier_code):
