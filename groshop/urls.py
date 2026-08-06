@@ -20,6 +20,7 @@ urlpatterns = [
     path('api/gamification/',  include('gamification.urls')),
     path('api/store/',         include('store.urls')),
     path('api/analytics/',     include('analytics.urls')),
+    path("api/delivery/", include("delivery.urls")),
 ]
 
 if settings.DEBUG:

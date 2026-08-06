@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     'store',
     'analytics',
     'banners',
+    "delivery",
 ]
 
 
