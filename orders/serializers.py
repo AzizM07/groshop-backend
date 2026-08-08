@@ -1,4 +1,3 @@
-# orders/serializers.py
 from rest_framework import serializers
 from .models import Order, SubOrder, OrderItem, CartItem
 
@@ -7,12 +6,10 @@ from .models import Order, SubOrder, OrderItem, CartItem
 # ORDER ITEM
 # ══════════════════════════════════════════════════════════════════
 class OrderItemSerializer(serializers.ModelSerializer):
-
-    product_id       = serializers.UUIDField(source='product.id', read_only=True)   # ← ajout
+    product_id       = serializers.UUIDField(source='product.id', read_only=True)
     product_name     = serializers.CharField(source='product.name', read_only=True)
     product_slug     = serializers.CharField(source='product.slug', read_only=True)
-    product_category = serializers.CharField(source='product.category.name',
-                                             read_only=True, allow_null=True, default=None)
+    product_category = serializers.CharField(source='product.category.name', read_only=True, allow_null=True, default=None)
     product_image    = serializers.SerializerMethodField()
 
     class Meta:
@@ -32,7 +29,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
 # SUB-ORDER
 # ══════════════════════════════════════════════════════════════════
 class SubOrderSerializer(serializers.ModelSerializer):
-
     items         = OrderItemSerializer(many=True, read_only=True)
     supplier_name = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug = serializers.CharField(source='supplier.slug', read_only=True)
@@ -47,46 +43,37 @@ class SubOrderSerializer(serializers.ModelSerializer):
 # ORDER LIST / DETAIL
 # ══════════════════════════════════════════════════════════════════
 class OrderListSerializer(serializers.ModelSerializer):
-
-    sub_orders       = SubOrderSerializer(many=True, read_only=True)   # ← ajout (option riche)
+    sub_orders       = SubOrderSerializer(many=True, read_only=True)
     sub_orders_count = serializers.SerializerMethodField()
+    reference        = serializers.CharField(read_only=True)   # ajout
 
     class Meta:
         model  = Order
-        fields = ['id', 'status', 'payment_status', 'payment_method',
+        fields = ['id', 'reference', 'status', 'payment_status', 'payment_method',
                   'total_tnd', 'discount_tnd', 'created_at',
-                  'sub_orders', 'sub_orders_count']       # ← ajout
+                  'sub_orders', 'sub_orders_count']
 
     def get_sub_orders_count(self, obj):
         return len(obj.sub_orders.all())
 
 
 class OrderDetailSerializer(serializers.ModelSerializer):
-
     sub_orders           = SubOrderSerializer(many=True, read_only=True)
-    shipping_address_id  = serializers.UUIDField(source='shipping_address_ref_id',
-                                                 read_only=True, allow_null=True)
+    shipping_address_id  = serializers.UUIDField(source='shipping_address_ref_id', read_only=True, allow_null=True)
+    reference            = serializers.CharField(read_only=True)   # ajout
 
     class Meta:
         model  = Order
-        fields = ['id', 'status', 'payment_status', 'payment_method',
+        fields = ['id', 'reference', 'status', 'payment_status', 'payment_method',
                   'total_tnd', 'discount_tnd',
                   'shipping_address', 'shipping_address_id',
                   'notes', 'created_at', 'sub_orders']
 
 
 class CreateOrderSerializer(serializers.Serializer):
-    """
-    Deux façons de passer l'adresse :
-      1. address_id  → on charge l'Address du buyer, on stocke la ref + snapshot texte.
-      2. shipping_address (texte) → fallback historique (rétro-compat).
-    Au moins l'un des deux doit être fourni.
-    """
     address_id       = serializers.UUIDField(required=False)
     shipping_address = serializers.CharField(required=False, allow_blank=True)
-    payment_method   = serializers.ChoiceField(choices=[
-        'cod', 'd17', 'flouci', 'sobflous', 'virement'
-    ])
+    payment_method   = serializers.ChoiceField(choices=['cod', 'd17', 'flouci', 'sobflous', 'virement'])
     notes            = serializers.CharField(required=False, allow_blank=True)
     items            = serializers.ListField(child=serializers.DictField())
 
@@ -102,18 +89,18 @@ class CreateOrderSerializer(serializers.Serializer):
 # SUPPLIER SUB-ORDER
 # ══════════════════════════════════════════════════════════════════
 class SupplierSubOrderSerializer(serializers.ModelSerializer):
-
-    order_id       = serializers.UUIDField(source='order.id', read_only=True)
-    buyer_name     = serializers.CharField(source='order.buyer.full_name', read_only=True)
-    payment_method = serializers.CharField(source='order.payment_method', read_only=True)
-    payment_status = serializers.CharField(source='order.payment_status', read_only=True)
-    items          = OrderItemSerializer(many=True, read_only=True)
-    items_count    = serializers.SerializerMethodField()
-    primary_image  = serializers.SerializerMethodField()
+    order_id        = serializers.UUIDField(source='order.id', read_only=True)
+    order_reference = serializers.CharField(source='order.reference', read_only=True)   # ajout
+    buyer_name      = serializers.CharField(source='order.buyer.full_name', read_only=True)
+    payment_method  = serializers.CharField(source='order.payment_method', read_only=True)
+    payment_status  = serializers.CharField(source='order.payment_status', read_only=True)
+    items           = OrderItemSerializer(many=True, read_only=True)
+    items_count     = serializers.SerializerMethodField()
+    primary_image   = serializers.SerializerMethodField()
 
     class Meta:
         model  = SubOrder
-        fields = ['id', 'order_id', 'status', 'subtotal_tnd', 'delivery_type',
+        fields = ['id', 'order_id', 'order_reference', 'status', 'subtotal_tnd', 'delivery_type',
                   'created_at', 'buyer_name', 'payment_method', 'payment_status',
                   'items', 'items_count', 'primary_image']
 
@@ -132,20 +119,13 @@ class SupplierSubOrderSerializer(serializers.ModelSerializer):
 
 
 # ══════════════════════════════════════════════════════════════════
-# CART ITEM (inchangé)
+# CART ITEM
 # ══════════════════════════════════════════════════════════════════
 class CartItemSerializer(serializers.ModelSerializer):
-
     product         = serializers.SerializerMethodField()
     variant_data    = serializers.SerializerMethodField()
-    unit_price_tnd  = serializers.DecimalField(
-                          source='unit_price',
-                          max_digits=10, decimal_places=3,
-                          read_only=True)
-    total_price_tnd = serializers.DecimalField(
-                          source='total_price',
-                          max_digits=12, decimal_places=3,
-                          read_only=True)
+    unit_price_tnd  = serializers.DecimalField(source='unit_price', max_digits=10, decimal_places=3, read_only=True)
+    total_price_tnd = serializers.DecimalField(source='total_price', max_digits=12, decimal_places=3, read_only=True)
 
     class Meta:
         model  = CartItem
@@ -155,7 +135,6 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     def get_product(self, obj):
         p = obj.product
-
         images = p.images.all()
         image_url = None
         for img in images:

@@ -1,6 +1,6 @@
-# orders/models.py
-from django.db import models
+from django.db import models, transaction
 import uuid
+from datetime import datetime
 from users.models import User, SupplierProfile, Address
 from products.models import Product, ProductVariant
 
@@ -9,10 +9,9 @@ from products.models import Product, ProductVariant
 # ORDER
 # ══════════════════════════════════════════════════════════════════
 class Order(models.Model):
-
     STATUS = [
         ('pending',          'En attente'),
-        ('call_confirmed',   'Confirmée par appel'),
+        ('confirmed',        'Confirmée'),          # harmonisé avec SubOrder
         ('in_production',    'En production'),
         ('shipped',          'Expédiée'),
         ('delivered',        'Livrée'),
@@ -41,11 +40,9 @@ class Order(models.Model):
     total_tnd        = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     discount_tnd     = models.DecimalField(max_digits=10, decimal_places=3, default=0)
 
-    # ── Adresse ──
-    # shipping_address : snapshot texte figé au moment de la commande.
-    #                    Reste lisible même si l'utilisateur supprime son adresse.
-    # shipping_address_ref : FK optionnel vers l'adresse d'origine.
-    #                        SET_NULL → si l'user supprime son adresse, on garde le snapshot.
+    # ⭐ CORRIGÉ : unique=True — empêche deux commandes d'avoir la même référence
+    reference = models.CharField(max_length=20, unique=True, blank=True, null=True)
+
     shipping_address     = models.TextField()
     shipping_address_ref = models.ForeignKey(
         Address,
@@ -53,7 +50,6 @@ class Order(models.Model):
         null=True, blank=True,
         related_name='orders',
     )
-
     notes            = models.TextField(blank=True)
     created_at       = models.DateTimeField(auto_now_add=True)
     updated_at       = models.DateTimeField(auto_now=True)
@@ -62,15 +58,35 @@ class Order(models.Model):
         db_table = 'orders'
         ordering = ['-created_at']
 
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            # ⭐ CORRIGÉ : select_for_update() dans une transaction atomique
+            # empêche deux commandes créées en même temps de recevoir
+            # le même numéro (race condition).
+            with transaction.atomic():
+                year = datetime.now().year
+                last = (
+                    Order.objects
+                    .select_for_update()
+                    .filter(reference__startswith=f'ORD-{year}-')
+                    .order_by('reference')
+                    .last()
+                )
+                if last:
+                    num = int(last.reference.split('-')[-1]) + 1
+                else:
+                    num = 1
+                self.reference = f'ORD-{year}-{num:04d}'
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f'Commande {self.id} — {self.buyer.full_name}'
+        return f'Commande {self.reference} — {self.buyer.full_name}'
 
 
 # ══════════════════════════════════════════════════════════════════
 # SUB-ORDER
 # ══════════════════════════════════════════════════════════════════
 class SubOrder(models.Model):
-
     STATUS = [
         ('pending',       'En attente'),
         ('confirmed',     'Confirmée'),
@@ -106,7 +122,6 @@ class SubOrder(models.Model):
 # ORDER ITEM
 # ══════════════════════════════════════════════════════════════════
 class OrderItem(models.Model):
-
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sub_order      = models.ForeignKey(SubOrder, on_delete=models.CASCADE, related_name='items')
     product        = models.ForeignKey(Product, on_delete=models.PROTECT, related_name='order_items')
@@ -125,21 +140,10 @@ class OrderItem(models.Model):
 # CART ITEM
 # ══════════════════════════════════════════════════════════════════
 class CartItem(models.Model):
-
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    buyer      = models.ForeignKey(
-                    User,
-                    on_delete=models.CASCADE,
-                    related_name='cart_items')
-    product    = models.ForeignKey(
-                    Product,
-                    on_delete=models.CASCADE,
-                    related_name='in_carts')
-    variant    = models.ForeignKey(
-                    ProductVariant,
-                    on_delete=models.CASCADE,
-                    null=True, blank=True,
-                    related_name='in_carts')
+    buyer      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items')
+    product    = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='in_carts')
+    variant    = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, null=True, blank=True, related_name='in_carts')
     quantity   = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -154,9 +158,7 @@ class CartItem(models.Model):
 
     @property
     def unit_price(self):
-        tier = self.product.price_tiers.filter(
-            min_qty__lte=self.quantity
-        ).order_by('-min_qty').first()
+        tier = self.product.price_tiers.filter(min_qty__lte=self.quantity).order_by('-min_qty').first()
         return tier.price_tnd if tier else self.product.base_price_tnd
 
     @property

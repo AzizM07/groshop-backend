@@ -1,4 +1,3 @@
-# orders/views.py
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -69,10 +68,6 @@ def create_order(request):
     if not items:
         return Response({'error': 'Aucun produit dans la commande.'}, status=400)
 
-    # ── Résolution de l'adresse ──
-    # Priorité : address_id (l'user a sélectionné une adresse sauvegardée)
-    #            → snapshot texte via formatted() + FK vers l'Address
-    # Fallback  : shipping_address texte brut (invités, ou legacy)
     address_ref = None
     address_snapshot = data.get('shipping_address', '')
 
@@ -176,8 +171,12 @@ def cancel_order(request, pk):
             id=pk, buyer=request.user, status='pending')
     except Order.DoesNotExist:
         return Response({'error': 'Commande non trouvée ou non annulable.'}, status=404)
-    order.status = 'cancelled'
-    order.save()
+
+    with transaction.atomic():
+        order.sub_orders.update(status='cancelled')
+        order.status = 'cancelled'
+        order.save()
+
     return Response({'message': 'Commande annulée.'})
 
 
@@ -269,16 +268,27 @@ def supplier_suborder_update(request, pk):
               .get(id=pk, supplier=request.user.supplier_profile))
     except SubOrder.DoesNotExist:
         return Response({'error': 'Sous-commande non trouvée.'}, status=404)
+
     new_status = request.data.get('status')
     if new_status not in dict(SubOrder.STATUS):
         return Response({'error': 'Statut invalide.'}, status=400)
+
+    update_fields = ['status', 'updated_at']
     so.status = new_status
-    so.save(update_fields=['status', 'updated_at'])
+
+    delivery_type = request.data.get('delivery_type')
+    if delivery_type is not None:
+        if delivery_type not in dict(SubOrder.DELIVERY_TYPES):
+            return Response({'error': 'Type de livraison invalide.'}, status=400)
+        so.delivery_type = delivery_type
+        update_fields.append('delivery_type')
+
+    so.save(update_fields=update_fields)
     return Response(SupplierSubOrderSerializer(so).data)
 
 
 # ══════════════════════════════════════════════════════════════════
-# CART (inchangé)
+# CART
 # ══════════════════════════════════════════════════════════════════
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
