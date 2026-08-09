@@ -35,12 +35,14 @@ ITEMS_PREFETCH = Prefetch(
 def orders_list(request):
     orders = (Order.objects
               .filter(buyer=request.user)
-              .prefetch_related('sub_orders')
+              .prefetch_related(
+                  Prefetch('sub_orders', queryset=SubOrder.objects
+                           .select_related('supplier')
+                           .prefetch_related(ITEMS_PREFETCH)),
+              )
               .order_by('-created_at'))
     serializer = OrderListSerializer(orders, many=True)
     return Response(serializer.data)
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def order_detail(request, pk):

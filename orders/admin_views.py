@@ -3,6 +3,12 @@
 # NB modèle : Order n'a PAS de date de livraison (ni delivered_at ni date prévue).
 #   → « en retard » est DÉRIVÉ de created_at + Product.delivery_days.
 #   → « délai moyen de livraison » n'est PAS calculable ici (voir admin_stats).
+#
+# ⭐ CORRIGÉ : le numéro de commande affiché (`ref`) utilise désormais
+# order.reference (ex: "ORD-2026-0007"), généré une seule fois par Order.save().
+# Avant, plusieurs endpoints reconstruisaient un numéro différent à partir de
+# l'id tronqué ("CMD-81A4FC70") → incohérent avec la page de confirmation et
+# la liste des commandes acheteur, qui utilisaient déjà order.reference.
 
 from datetime import timedelta
 from store.models import SubscriptionPlan 
@@ -72,11 +78,18 @@ def _due_label(sub_order):
     return f'Dans {days} jours'
 
 
+def _order_ref(order):
+    """⭐ Numéro de commande affiché — TOUJOURS order.reference.
+    Fallback sur l'id tronqué uniquement si reference est absent
+    (ne devrait jamais arriver : Order.save() le génère systématiquement)."""
+    return order.reference or f'CMD-{str(order.id)[:8].upper()}'
+
+
 def _suborder_row(so):
     return {
         'id':            str(so.id),
         'order_id':      str(so.order_id),
-        'ref':           f'CMD-{str(so.order_id)[:8].upper()}',
+        'ref':           _order_ref(so.order),
         'buyer_name':    so.order.buyer.full_name,
         'initials':      _initials(so.order.buyer.full_name),
         'supplier_name': so.supplier.company_name,
@@ -183,8 +196,13 @@ def admin_orders(request):
 
     search = request.GET.get('search')
     if search:
-        s = search.replace('CMD-', '').replace('cmd-', '').strip()
-        qs = qs.filter(Q(order__id__icontains=s) | Q(id__icontains=s))
+        # ⭐ CORRIGÉ : recherche sur order.reference (ex: "ORD-2026-0007")
+        # au lieu de order.id — c'est ce numéro qui est affiché et copié
+        # partout côté client, donc c'est lui que l'admin va taper.
+        s = search.strip()
+        qs = qs.filter(Q(order__reference__icontains=s) |
+                       Q(order__id__icontains=s) |
+                       Q(id__icontains=s))
 
     page = int(request.GET.get('page', 1))
     page_size = int(request.GET.get('page_size', 20))
@@ -237,7 +255,7 @@ def admin_order_detail(request, sub_order_id):
     return Response({
         'id':               str(so.id),
         'order_id':         str(order.id),
-        'ref':              f'CMD-{str(order.id)[:8].upper()}',
+        'ref':              _order_ref(order),
         'status':           so.status,
         'status_label':     dict(SubOrder.STATUS).get(so.status, so.status),
         'order_status':     order.status,
@@ -336,7 +354,7 @@ def admin_payments(request):
 
     results = [{
         'id':             str(o.id),
-        'ref':            f'CMD-{str(o.id)[:8].upper()}',
+        'ref':            _order_ref(o),
         'buyer_name':     o.buyer.full_name,
         'total_tnd':      str(o.total_tnd),
         'payment_status': o.payment_status,
