@@ -22,7 +22,7 @@ urlpatterns = [
     path('upload-image/', views.upload_product_image, name='product-upload-image'),
     path('upload-video/', views.upload_product_video),
     path('mine/',         views.my_products,          name='product-mine'),
-
+    path('products/categories/for-you/', views.categories_for_you),
     # ── Détail produit (UUID) — doit rester en dernier ──
     path('reviews/create/', views.create_review, name='review-create'),
     path('autocomplete/', views.search_autocomplete, name='search-autocomplete'),

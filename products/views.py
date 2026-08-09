@@ -791,6 +791,85 @@ def upload_product_video(request):
         return Response({'error': "Vidéo illisible ou corrompue."}, status=400)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+# ── Catégories pour vous (méga-menu) ──────────────────────────────
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def categories_for_you(request):
+    """
+    Sous-catégories personnalisées pour le méga-menu "Toutes les catégories".
+    Priorité :
+      1. Catégories des produits recherchés récemment (SearchHistory)
+      2. Catégories des produits vus/achetés récemment (ProductInteraction)
+      3. Fallback : sous-catégories les plus vendues, toutes confondues
+    Le résultat est stable pour un même utilisateur tant que son
+    comportement ne change pas (pas de random), et se réévalue naturellement
+    à chaque nouvel appel réseau (donc à chaque rechargement de page).
+    """
+    LIMIT = 14
+    category_ids = []
+
+    if request.user.is_authenticated:
+        from store.models import SearchHistory, ProductInteraction
+
+        # 1) Catégories des termes recherchés récemment, en matchant le nom
+        #    de catégorie/sous-catégorie contenu dans la requête tapée.
+        recent_queries = list(
+            SearchHistory.objects
+            .filter(user=request.user)
+            .order_by('-created_at')
+            .values_list('query', flat=True)[:15]
+        )
+
+        if recent_queries:
+            q = Q()
+            for term in recent_queries:
+                term = (term or '').strip()
+                if term:
+                    q |= Q(name__icontains=term)
+            matched = (
+                Category.objects.filter(q, parent__isnull=False, is_active=True)
+                .values_list('id', flat=True)
+            )
+            category_ids.extend(matched)
+
+        # 2) Complète avec les catégories des produits vus/achetés
+        if len(category_ids) < LIMIT:
+            top_categories = (
+                ProductInteraction.objects
+                .filter(user=request.user)
+                .values('product__category')
+                .annotate(n=Count('product__category'))
+                .order_by('-n')[:5]
+            )
+            for row in top_categories:
+                cid = row['product__category']
+                if cid and cid not in category_ids:
+                    category_ids.append(cid)
+
+    subcats = []
+    if category_ids:
+        subcats = list(
+            Category.objects.filter(
+                id__in=category_ids, parent__isnull=False, is_active=True,
+            )[:LIMIT]
+        )
+
+    # 3) Fallback : complète avec les sous-catégories les plus représentées
+    #    en produits vendus, pour ne jamais renvoyer un menu vide (visiteur
+    #    anonyme, nouvel utilisateur, historique trop pauvre).
+    if len(subcats) < LIMIT:
+        existing_ids = [c.id for c in subcats]
+        remaining = LIMIT - len(subcats)
+        fallback = (
+            Category.objects.filter(parent__isnull=False, is_active=True)
+            .exclude(id__in=existing_ids)
+            .annotate(product_n=Count('product', filter=Q(product__status='approved')))
+            .order_by('-product_n')[:remaining]
+        )
+        subcats += list(fallback)
+
+    serializer = CategorySerializer(subcats, many=True)
+    return Response(serializer.data)
 # ── Mes produits (liste fournisseur) ──────────────────────────────
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
