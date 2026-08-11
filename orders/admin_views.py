@@ -424,7 +424,31 @@ def admin_review_product(request, product_id):
     p.save(update_fields=['status'])
     return Response({'id': str(p.id), 'status': p.status})
 
+# ──────────────────────────────────────────────────────────────────
+# PATCH /api/admin/products/<uuid>/specs/  — corrige les specs avant validation
+# body : { "specs": [{"k": "Matière", "v": "Coton"}, ...] }
+# ──────────────────────────────────────────────────────────────────
+@api_view(['PATCH'])
+@authentication_classes([CookieJWTAuthentication])
+@permission_classes([IsAdmin])
+def admin_update_product_specs(request, product_id):
+    try:
+        p = Product.objects.get(id=product_id)
+    except Product.DoesNotExist:
+        return Response({'detail': 'Produit introuvable.'},
+                        status=http_status.HTTP_404_NOT_FOUND)
 
+    specs = request.data.get('specs', [])
+    if not isinstance(specs, list):
+        return Response({'detail': 'Format invalide.'}, status=http_status.HTTP_400_BAD_REQUEST)
+
+    # Reconstruit specs_raw depuis le tableau corrigé (source unique inchangée)
+    lines = [f"{s.get('k', '').strip()}: {s.get('v', '').strip()}"
+             for s in specs if s.get('k', '').strip() and s.get('v', '').strip()]
+    p.specs_raw = '\n'.join(lines)
+    p.save(update_fields=['specs_raw'])
+
+    return Response({'id': str(p.id), 'specs_raw': p.specs_raw})
 # ──────────────────────────────────────────────────────────────────
 # GET /api/admin/users/  — comptes plateforme
 # Filtre : ?role=buyer|supplier|admin

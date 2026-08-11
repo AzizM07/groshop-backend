@@ -21,6 +21,7 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv(
 # APPS
 # ═══════════════════════════════════════════════════════════════════
 INSTALLED_APPS = [
+    'modeltranslation',   
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -82,6 +83,15 @@ TEMPLATES = [
             ],
         },
     },
+]
+MODELTRANSLATION_DEFAULT_LANGUAGE = 'fr'
+MODELTRANSLATION_LANGUAGES = ('fr', 'en', 'ar')
+MODELTRANSLATION_FALLBACK_LANGUAGES = ('fr',)   # si name_en ou name_ar vide → retombe sur name_fr
+
+LANGUAGES = [
+    ('fr', 'Français'),
+    ('en', 'English'),
+    ('ar', 'العربية'),
 ]
 
 WSGI_APPLICATION = 'groshop.wsgi.application'
