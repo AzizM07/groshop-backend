@@ -449,6 +449,45 @@ def admin_update_product_specs(request, product_id):
     p.save(update_fields=['specs_raw'])
 
     return Response({'id': str(p.id), 'specs_raw': p.specs_raw})
+
+# ──────────────────────────────────────────────────────────────────
+# PATCH /api/admin/products/<uuid>/translations/  — corrige les 3 langues avant validation
+# body : { "name_fr": "...", "name_en": "...", "name_ar": "...",
+#          "description_fr": "...", "description_en": "...", "description_ar": "..." }
+# Seuls les champs présents dans le body sont mis à jour (édition partielle possible).
+# ──────────────────────────────────────────────────────────────────
+TRANSLATABLE_FIELDS = [
+    'name_fr', 'name_en', 'name_ar',
+    'description_fr', 'description_en', 'description_ar',
+]
+
+@api_view(['PATCH'])
+@authentication_classes([CookieJWTAuthentication])
+@permission_classes([IsAdmin])
+def admin_update_product_translations(request, product_id):
+    try:
+        p = Product.objects.get(id=product_id)
+    except Product.DoesNotExist:
+        return Response({'detail': 'Produit introuvable.'},
+                        status=http_status.HTTP_404_NOT_FOUND)
+
+    data = request.data
+    updated_fields = []
+    for field in TRANSLATABLE_FIELDS:
+        if field in data:
+            setattr(p, field, (data.get(field) or '').strip())
+            updated_fields.append(field)
+
+    if not updated_fields:
+        return Response({'detail': 'Aucun champ à mettre à jour.'},
+                        status=http_status.HTTP_400_BAD_REQUEST)
+
+    p.save(update_fields=updated_fields)
+
+    return Response({
+        'id': str(p.id),
+        **{f: getattr(p, f) for f in TRANSLATABLE_FIELDS},
+    })
 # ──────────────────────────────────────────────────────────────────
 # GET /api/admin/users/  — comptes plateforme
 # Filtre : ?role=buyer|supplier|admin
@@ -578,10 +617,12 @@ def admin_product_detail(request, product_id):
     except Product.DoesNotExist:
         return Response({'detail': 'Produit introuvable.'},
                         status=http_status.HTTP_404_NOT_FOUND)
-
     return Response({
         'id':                 str(p.id),
         'name':               p.name,
+        'name_fr':            p.name_fr,
+        'name_en':            p.name_en,
+        'name_ar':            p.name_ar,
         'slug':               p.slug,
         'description':        p.description,
         'sku':                p.sku,

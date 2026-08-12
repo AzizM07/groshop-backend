@@ -166,7 +166,12 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES':        ('Bearer',),
 }
 
-
+# ═══════════════════════════════════════════════════════════════════
+# AWS TRANSLATE (traduction automatique des produits)
+# ═══════════════════════════════════════════════════════════════════
+AWS_TRANSLATE_ACCESS_KEY = config('AWS_TRANSLATE_ACCESS_KEY', default='')
+AWS_TRANSLATE_SECRET_KEY = config('AWS_TRANSLATE_SECRET_KEY', default='')
+AWS_TRANSLATE_REGION = config('AWS_TRANSLATE_REGION', default='eu-west-1')
 # ═══════════════════════════════════════════════════════════════════
 # CORS + CSRF
 # ═══════════════════════════════════════════════════════════════════
