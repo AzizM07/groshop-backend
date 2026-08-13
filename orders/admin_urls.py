@@ -18,6 +18,9 @@ urlpatterns = [
     path('products/',                            admin_views.admin_products,          name='admin_products'),
     path('products/<uuid:product_id>/',          admin_views.admin_product_detail,    name='admin_product_detail'),
     path('products/<uuid:product_id>/review/',   admin_views.admin_review_product,    name='admin_review_product'),
+    # ⭐ NOUVEAU : corrections avant validation
+    path('products/<uuid:product_id>/specs/',        admin_views.admin_update_product_specs,        name='admin_update_product_specs'),
+    path('products/<uuid:product_id>/translations/', admin_views.admin_update_product_translations, name='admin_update_product_translations'),
 
     # Utilisateurs
     path('users/',                               admin_views.admin_users,             name='admin_users'),

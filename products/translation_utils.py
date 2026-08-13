@@ -5,7 +5,7 @@ SOURCE_LANG = 'fr'
 
 # Quels champs traduire pour chaque modèle
 TRANSLATE_CONFIG = {
-    'Product': ['name', 'description'],
+    'Product': ['name', 'description', 'specs_raw'],
     'Category': ['name'],
     'ProductVariant': ['name'],
     'ProductChoiceGroup': ['name'],
