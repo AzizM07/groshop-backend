@@ -30,6 +30,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('admin',    'Administrateur'),
     ]
 
+    # ⭐ NOUVEAU : langue préférée du user, persistée en base.
+    # Nécessaire pour tout envoi asynchrone (push notifications) où il n'y a
+    # pas de requête HTTP en cours pour lire le header X-Lang.
+    LANGUAGES = [
+        ('fr', 'Français'),
+        ('en', 'English'),
+        ('ar', 'العربية'),
+    ]
+
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email          = models.EmailField(unique=True)
     phone          = models.CharField(max_length=20, blank=True)
@@ -37,6 +46,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     full_name      = models.CharField(max_length=150)
     avatar_url     = models.TextField(blank=True)
     role           = models.CharField(max_length=20, choices=ROLES, default='buyer')
+    language       = models.CharField(max_length=2, choices=LANGUAGES, default='fr')  # ⭐ NOUVEAU
     is_verified    = models.BooleanField(default=False)
     is_active      = models.BooleanField(default=True)
     is_staff       = models.BooleanField(default=False)

@@ -179,6 +179,23 @@ def me(request):
     return Response(UserSerializer(request.user).data)
 
 
+# ── Langue préférée ────────────────────────────────────────────────
+# ⭐ NOUVEAU : persiste la langue choisie côté client (localStorage) vers le
+# compte User en base. Indispensable pour tout envoi asynchrone (push
+# notifications) où il n'y a pas de requête HTTP en cours pour lire le
+# header X-Lang — voir ActiveLanguageMiddleware qui, lui, ne couvre que le
+# cycle requête/réponse.
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def update_language(request):
+    lang = request.data.get('language')
+    if lang not in ('fr', 'en', 'ar'):
+        return Response({'error': 'Langue invalide.'}, status=status.HTTP_400_BAD_REQUEST)
+    request.user.language = lang
+    request.user.save(update_fields=['language'])
+    return Response({'language': lang})
+
+
 # ── Logout ────────────────────────────────────────────────────────
 @api_view(['POST'])
 @permission_classes([AllowAny])
