@@ -488,53 +488,77 @@ def product_detail(request, pk):
 
 
 # ── Search (via Meilisearch — tolérant aux fautes) ────────────────
+# ── Search (via Meilisearch — tolérant aux fautes) ────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def search_products(request):
 
     query = request.query_params.get('q', '').strip()
-    if not query:
-        return Response({'error': 'Paramètre q obligatoire.'}, status=400)
+    cat   = request.query_params.get('cat', '').strip()   # ⭐ AJOUTÉ : slug OU id numérique
 
-    from . import search as meili
+    # ⭐ Au moins un des deux est obligatoire (avant : q seul)
+    if not query and not cat:
+        return Response({'error': 'Paramètre q ou cat obligatoire.'}, status=400)
 
-    # 1) Meilisearch renvoie les IDs correspondants (fuzzy), classés par pertinence
-    try:
-        res = meili.get_index().search(query, {
-            'limit': 40,
-            'attributesToRetrieve': ['id'],
-        })
-        ids = [h['id'] for h in res.get('hits', [])]
-    except Exception:
-        ids = None   # Meilisearch down → fallback Postgres plus bas
+    products = []
 
-    if ids is not None:
-        # 2) On recharge les produits complets depuis Postgres (pour la sérialisation)
-        products_qs = _list_queryset().filter(status='approved', id__in=ids)
+    # ── Cas 1 : mot-clé → Meilisearch (fuzzy), puis on recharge en base ──
+    if query:
+        from . import search as meili
+        try:
+            res = meili.get_index().search(query, {
+                'limit': 40,
+                'attributesToRetrieve': ['id'],
+            })
+            ids = [h['id'] for h in res.get('hits', [])]
+        except Exception:
+            ids = None   # Meilisearch down → fallback Postgres
 
-        # 3) On respecte l'ordre de pertinence de Meilisearch
-        by_id = {str(p.id): p for p in products_qs}
-        products = [by_id[i] for i in ids if i in by_id]
+        if ids is not None:
+            products_qs = _list_queryset().filter(status='approved', id__in=ids)
+            by_id = {str(p.id): p for p in products_qs}
+            products = [by_id[i] for i in ids if i in by_id]
+        else:
+            products = list(_list_queryset().filter(
+                status='approved'
+            ).filter(
+                Q(name__icontains=query) |
+                Q(description__icontains=query) |
+                Q(category__name__icontains=query) |
+                Q(supplier__company_name__icontains=query)
+            ).order_by('-sold_count')[:40])
+
+    # ── Cas 2 : pas de mot-clé mais une catégorie → parcours direct par catégorie ──
     else:
-        # Fallback : ancienne recherche Postgres si Meilisearch est éteint
-        products = list(_list_queryset().filter(
-            status='approved'
-        ).filter(
-            Q(name__icontains=query) |
-            Q(description__icontains=query) |
-            Q(category__name__icontains=query) |
-            Q(supplier__company_name__icontains=query)
-        ).order_by('-sold_count')[:20])
+        qs = _list_queryset().filter(status='approved')
+        # cat peut être un slug ("beaute") OU un id numérique
+        if cat.isdigit():
+            qs = qs.filter(category_id=int(cat))
+        else:
+            qs = qs.filter(category__slug=cat)
+        products = list(qs.order_by('-sold_count')[:40])
 
-    if request.user.is_authenticated:
+    # ── Filtre catégorie supplémentaire (si q ET cat) ──
+    if query and cat:
+        if cat.isdigit():
+            products = [p for p in products if p.category_id == int(cat)]
+        else:
+            products = [p for p in products if p.category and p.category.slug == cat]
+
+    # ── Historique de recherche (uniquement si mot-clé) ──
+    if query and request.user.is_authenticated:
         from store.models import SearchHistory
         SearchHistory.objects.create(
             user=request.user, query=query, result_count=len(products),
         )
 
     serializer = ProductListSerializer(products[:20], many=True)
-    return Response({'query': query, 'total': len(products), 'results': serializer.data})
-
+    return Response({
+        'query': query,
+        'cat': cat,
+        'total': len(products),
+        'results': serializer.data,
+    })
 
 # ── Similar Products ──────────────────────────────────────────────
 @api_view(['GET'])

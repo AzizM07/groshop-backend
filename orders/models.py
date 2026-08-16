@@ -141,7 +141,8 @@ class OrderItem(models.Model):
 # ══════════════════════════════════════════════════════════════════
 class CartItem(models.Model):
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    buyer      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items')
+    buyer      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='cart_items', null=True, blank=True)  # ⭐ nullable
+    guest_id   = models.UUIDField(null=True, blank=True, db_index=True)  # ⭐ AJOUTÉ : panier invité
     product    = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='in_carts')
     variant    = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, null=True, blank=True, related_name='in_carts')
     quantity   = models.PositiveIntegerField(default=1)
@@ -149,12 +150,33 @@ class CartItem(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table        = 'cart_items'
-        ordering        = ['-created_at']
-        unique_together = ('buyer', 'product', 'variant')
+        db_table = 'cart_items'
+        ordering = ['-created_at']
+        # ⭐ Contraintes : soit buyer, soit guest_id (jamais les 2 ni aucun),
+        #    et unicité par (owner, product, variant)
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(buyer__isnull=False, guest_id__isnull=True) |
+                    models.Q(buyer__isnull=True,  guest_id__isnull=False)
+                ),
+                name='cart_owner_xor',
+            ),
+            models.UniqueConstraint(
+                fields=['buyer', 'product', 'variant'],
+                name='uniq_cart_user',
+                condition=models.Q(buyer__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=['guest_id', 'product', 'variant'],
+                name='uniq_cart_guest',
+                condition=models.Q(guest_id__isnull=False),
+            ),
+        ]
 
     def __str__(self):
-        return f'{self.buyer.email} — {self.product.name} x{self.quantity}'
+        owner = self.buyer.email if self.buyer else f'guest:{self.guest_id}'
+        return f'{owner} — {self.product.name} x{self.quantity}'
 
     @property
     def unit_price(self):

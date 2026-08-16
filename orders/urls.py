@@ -5,7 +5,7 @@ from . import admin_views   # ← AJOUT
 urlpatterns = [
     path('',                     views.orders_list,             name='orders-list'),
     path('create/',              views.create_order,            name='create-order'),
-
+    path('cart/merge/', views.cart_merge, name='cart-merge'),
     # ── Espace fournisseur (avant <uuid:pk>) ──
     path('supplier/',            views.supplier_orders,          name='supplier-orders'),
     path('supplier/<uuid:pk>/',  views.supplier_suborder_update, name='supplier-suborder-update'),

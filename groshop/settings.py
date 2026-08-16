@@ -63,6 +63,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'groshop.middleware.ActiveLanguageMiddleware',   # ⭐ AJOUTÉ ici
     'users.middleware.LastSeenMiddleware',
+    'orders.middleware.GuestCartMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]

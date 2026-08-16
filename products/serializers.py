@@ -203,6 +203,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     supplier_logo   = serializers.SerializerMethodField()
     supplier_banner = serializers.SerializerMethodField()
 
+    category_id   = serializers.IntegerField(source='category.id',   read_only=True, allow_null=True, default=None)  # ⭐ AJOUTÉ
     category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True, default=None)
     category_slug = serializers.CharField(source='category.slug', read_only=True, allow_null=True, default=None)
 
@@ -222,7 +223,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'supplier_name', 'supplier_slug', 'supplier_logo', 'supplier_banner',
             'supplier_rating', 'supplier_rating_count',
             'supplier_city', 'supplier_wilaya', 'supplier_verified',
-            'category_name', 'category_slug',
+            'category_id', 'category_name', 'category_slug',   # ⭐ category_id AJOUTÉ ici
             'is_favorited',
         ]
 
@@ -248,24 +249,17 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     # ── Méthodes pour le logo / bannière ──
     def _get_store(self, obj):
-        # getattr(..., None) neutralise RelatedObjectDoesNotExist quand
-        # le fournisseur n'a pas encore de ligne SupplierStore.
         if obj.supplier_id:
             return getattr(obj.supplier, 'store', None)
         return None
 
     def get_supplier_logo(self, obj):
-        # ⚠️ SupplierStore ne porte QUE logo_url (pas de brand_logo_url / logo).
-        #    Référencer un champ inexistant lèverait AttributeError → 500.
         store = self._get_store(obj)
         return (store.logo_url or '') if store else ''
 
     def get_supplier_banner(self, obj):
-        # ⚠️ SupplierStore ne porte QUE banner_url (pas de banner).
         store = self._get_store(obj)
         return (store.banner_url or '') if store else ''
-
-
 # ── Review ────────────────────────────────────────────────────────
 class ReviewPhotoSerializer(serializers.ModelSerializer):
 

@@ -290,13 +290,30 @@ def supplier_suborder_update(request, pk):
 
 
 # ══════════════════════════════════════════════════════════════════
-# CART
+# CART — accepte user connecté OU invité (via guest_id cookie)
 # ══════════════════════════════════════════════════════════════════
+from rest_framework.permissions import AllowAny
+
+
+def _cart_filter(request):
+    """Retourne le filtre queryset selon connecté / invité."""
+    if request.user.is_authenticated:
+        return {'buyer': request.user}
+    return {'guest_id': request.guest_id}
+
+
+def _cart_owner_fields(request):
+    """Retourne les kwargs pour create/update_or_create."""
+    if request.user.is_authenticated:
+        return {'buyer': request.user, 'guest_id': None}
+    return {'buyer': None, 'guest_id': request.guest_id}
+
+
 @api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def cart_view(request):
     if request.method == 'GET':
-        items = CartItem.objects.filter(buyer=request.user).select_related(
+        items = CartItem.objects.filter(**_cart_filter(request)).select_related(
             'product', 'product__supplier', 'variant',
         ).prefetch_related('product__images', 'product__price_tiers')
         return Response(CartItemSerializer(items, many=True).data)
@@ -322,10 +339,10 @@ def cart_view(request):
         quantity = product.moq
 
     item, created = CartItem.objects.update_or_create(
-        buyer=request.user,
         product=product,
         variant_id=variant_id,
-        defaults={'quantity': quantity},
+        **_cart_filter(request),
+        defaults={'quantity': quantity, **_cart_owner_fields(request)},
     )
 
     return Response(
@@ -334,12 +351,12 @@ def cart_view(request):
 
 
 @api_view(['PATCH', 'DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def cart_item_view(request, pk):
     item = get_object_or_404(
         CartItem.objects.select_related('product', 'product__supplier', 'variant')
                         .prefetch_related('product__images', 'product__price_tiers'),
-        id=pk, buyer=request.user,
+        id=pk, **_cart_filter(request),
     )
 
     if request.method == 'DELETE':
@@ -362,14 +379,56 @@ def cart_item_view(request, pk):
 
 
 @api_view(['DELETE'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def cart_clear(request):
-    CartItem.objects.filter(buyer=request.user).delete()
+    CartItem.objects.filter(**_cart_filter(request)).delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def cart_count(request):
-    count = CartItem.objects.filter(buyer=request.user).count()
+    count = CartItem.objects.filter(**_cart_filter(request)).count()
     return Response({'count': count})
+
+
+# ══════════════════════════════════════════════════════════════════
+# CART MERGE — appelée après login/register pour fusionner panier invité
+# ══════════════════════════════════════════════════════════════════
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cart_merge(request):
+    """
+    Fusionne le panier invité (lié au cookie gs_guest_id) dans le panier
+    de l'utilisateur qui vient de se connecter. Si un même produit existe
+    des deux côtés, on additionne les quantités.
+    """
+    guest_id = getattr(request, 'guest_id', None)
+    if not guest_id:
+        return Response({'merged': 0})
+
+    guest_items = list(CartItem.objects.filter(guest_id=guest_id))
+    if not guest_items:
+        return Response({'merged': 0})
+
+    merged = 0
+    with transaction.atomic():
+        for g_item in guest_items:
+            existing = CartItem.objects.filter(
+                buyer=request.user,
+                product=g_item.product,
+                variant=g_item.variant,
+            ).first()
+            if existing:
+                # Additionne les quantités
+                existing.quantity = existing.quantity + g_item.quantity
+                existing.save(update_fields=['quantity', 'updated_at'])
+                g_item.delete()
+            else:
+                # Transfère au user
+                g_item.buyer = request.user
+                g_item.guest_id = None
+                g_item.save(update_fields=['buyer', 'guest_id', 'updated_at'])
+            merged += 1
+
+    return Response({'merged': merged})
