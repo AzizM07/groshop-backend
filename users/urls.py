@@ -32,9 +32,7 @@ urlpatterns = [
 
     path('facebook/token/',          social_auth.facebook_token,  name='facebook-token'),
 
-    # ⚠️ Ces deux routes génériques doivent rester EN DERNIER : <str:provider>
-    #    matche n'importe quel segment, donc toute route spécifique (phone/, facebook/…)
-    #    doit être déclarée avant, sinon elle serait avalée par 'provider'.
+    path('business/', views.business_profile, name='business_profile'),
     path('<str:provider>/start/',    social_auth.social_start),
     path('<str:provider>/callback/', social_auth.social_callback),
 ]

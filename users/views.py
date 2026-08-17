@@ -2,7 +2,7 @@ import os
 import uuid
 from rest_framework.decorators import api_view, permission_classes, throttle_classes, parser_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework import status
@@ -20,7 +20,7 @@ from io import BytesIO
 from .serializers import (
     RegisterBuyerSerializer, RegisterSupplierSerializer, UserSerializer,
     SupplierPublicSerializer, SupplierStoreSerializer, SupplierStoreWriteSerializer,
-    AddressSerializer,
+    AddressSerializer, BusinessProfileSerializer,
 )
 from .models import User, SupplierProfile, SupplierStore, Address
 from decouple import config
@@ -262,7 +262,7 @@ def supplier_products(request, slug):
         except (TypeError, ValueError):
             pass
 
-    return Response(ProductListSerializer(products, many=True).data)
+    return Response(ProductListSerializer(products, many=True, context={'request': request}).data)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -650,3 +650,24 @@ def address_set_default(request, pk):
         addr.save(update_fields=['is_default'])
 
     return Response(AddressSerializer(addr).data)
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUSINESS PROFILE — vérification boutique pour accès prix masqués
+# ══════════════════════════════════════════════════════════════════
+@api_view(['GET', 'PATCH'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
+def business_profile(request):
+    """
+    GET   /api/users/business/  → consulte son profil boutique + statut
+    PATCH /api/users/business/  → soumet / met à jour ses infos (repasse en 'pending')
+    """
+    if request.method == 'GET':
+        return Response(BusinessProfileSerializer(request.user).data)
+
+    # PATCH
+    serializer = BusinessProfileSerializer(request.user, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)

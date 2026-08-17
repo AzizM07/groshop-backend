@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.utils.text import slugify
 import uuid as _uuid
-
+from .access_models import can_see_price
 from .models import (
     Category, Product, ProductImage, ProductPriceTier,
     ProductShippingTier,
@@ -108,7 +108,7 @@ class ProductVariantComboSerializer(serializers.ModelSerializer):
 class ProductListSerializer(serializers.ModelSerializer):
 
     primary_image     = serializers.SerializerMethodField()
-    images            = ProductImageSerializer(many=True, read_only=True)   # ← AJOUT
+    images            = ProductImageSerializer(many=True, read_only=True)
     supplier_name     = serializers.CharField(source='supplier.company_name', read_only=True)
     supplier_slug     = serializers.CharField(source='supplier.slug', read_only=True)
     supplier_verified = serializers.CharField(source='supplier.verification_status', read_only=True)
@@ -117,21 +117,23 @@ class ProductListSerializer(serializers.ModelSerializer):
                                               allow_null=True, default=None)
     years_active      = serializers.SerializerMethodField()
     price_tiers       = ProductPriceTierSerializer(many=True, read_only=True)
+    price_locked      = serializers.SerializerMethodField()  # ⭐ AJOUTÉ
 
     class Meta:
         model  = Product
         fields = [
             'id', 'name', 'slug',
             'base_price_tnd', 'old_price_tnd',
-            'moq', 'unit', 'in_stock',                                      # ← in_stock
+            'moq', 'unit', 'in_stock',
             'sold_count', 'rating_avg', 'rating_count',
             'badge_choice', 'badge_flash', 'badge_flash_end',
             'is_free_shipping',
-            'primary_image', 'images',                                      # ← AJOUT
+            'primary_image', 'images',
             'supplier_name', 'supplier_slug', 'supplier_verified', 'supplier_medals',
             'category_name',
             'years_active',
             'price_tiers',
+            'price_visibility', 'price_locked',   # ⭐ AJOUTÉS
         ]
 
     def get_primary_image(self, obj):
@@ -150,6 +152,21 @@ class ProductListSerializer(serializers.ModelSerializer):
         if rating is None:
             return 0
         return round(float(rating))
+
+    def get_price_locked(self, obj):
+        request = self.context.get('request')
+        user    = request.user if request else None
+        return not can_see_price(user, obj)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('price_locked'):
+            # Masque tout le pricing pour les non-éligibles
+            data['base_price_tnd'] = None
+            data['old_price_tnd']  = None
+            data['moq']            = None
+            data['price_tiers']    = []
+        return data
 
 
 # ── Category (#2 — variante 'icon') ───────────────────────────────
@@ -189,6 +206,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     variant_combos = ProductVariantComboSerializer(many=True, read_only=True)
     specs          = serializers.SerializerMethodField()
     is_favorited   = serializers.SerializerMethodField()
+    price_locked   = serializers.SerializerMethodField()  # ⭐ AJOUTÉ
 
     # ── Champs du fournisseur (plats) ──
     supplier_name         = serializers.CharField(source='supplier.company_name', read_only=True, default='')
@@ -203,7 +221,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     supplier_logo   = serializers.SerializerMethodField()
     supplier_banner = serializers.SerializerMethodField()
 
-    category_id   = serializers.IntegerField(source='category.id',   read_only=True, allow_null=True, default=None)  # ⭐ AJOUTÉ
+    category_id   = serializers.IntegerField(source='category.id',   read_only=True, allow_null=True, default=None)
     category_name = serializers.CharField(source='category.name', read_only=True, allow_null=True, default=None)
     category_slug = serializers.CharField(source='category.slug', read_only=True, allow_null=True, default=None)
 
@@ -223,8 +241,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'supplier_name', 'supplier_slug', 'supplier_logo', 'supplier_banner',
             'supplier_rating', 'supplier_rating_count',
             'supplier_city', 'supplier_wilaya', 'supplier_verified',
-            'category_id', 'category_name', 'category_slug',   # ⭐ category_id AJOUTÉ ici
+            'category_id', 'category_name', 'category_slug',
             'is_favorited',
+            'price_visibility', 'price_locked',   # ⭐ AJOUTÉS
         ]
 
     def get_specs(self, obj):
@@ -260,6 +279,36 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     def get_supplier_banner(self, obj):
         store = self._get_store(obj)
         return (store.banner_url or '') if store else ''
+
+    def get_price_locked(self, obj):
+        request = self.context.get('request')
+        user    = request.user if request else None
+        return not can_see_price(user, obj)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('price_locked'):
+            data['base_price_tnd']       = None
+            data['old_price_tnd']        = None
+            data['moq']                  = None
+            data['shipping_price_tnd']   = None
+            data['shipping_block_price'] = None
+            data['shipping_tiers']       = []
+            data['price_tiers']          = []
+            # Les variants gardent leur structure mais on masque leurs prix
+            for v in data.get('variants', []):
+                if 'price_delta_tnd' in v:
+                    v['price_delta_tnd'] = None
+            for c in data.get('variant_combos', []):
+                if 'price_tnd' in c:
+                    c['price_tnd'] = None
+                # masque aussi les tiers imbriqués du combo
+                for t in c.get('price_tiers', []) or []:
+                    t['price_tnd']     = None
+                    t['old_price_tnd'] = None
+        return data
+
+
 # ── Review ────────────────────────────────────────────────────────
 class ReviewPhotoSerializer(serializers.ModelSerializer):
 
@@ -354,7 +403,7 @@ class ProductCreateSerializer(serializers.ModelSerializer):
     price_tiers    = _TierWrite(many=True)
     shipping_tiers = _ShippingTierWrite(many=True, required=False)
     choice_groups  = _ChoiceGroupWrite(many=True, required=False)
-    variant_combos = _VariantComboWrite(many=True, required=False)   # ← AJOUT
+    variant_combos = _VariantComboWrite(many=True, required=False)
 
     class Meta:
         model  = Product
@@ -427,7 +476,7 @@ class ProductCreateSerializer(serializers.ModelSerializer):
         tiers      = validated_data.pop('price_tiers', [])
         ship_tiers = validated_data.pop('shipping_tiers', [])
         groups     = validated_data.pop('choice_groups', [])
-        combos     = validated_data.pop('variant_combos', [])   # ← AJOUT
+        combos     = validated_data.pop('variant_combos', [])
 
         tiers = sorted(tiers, key=lambda t: t['min_qty'])
         # Bornes hautes auto : jusqu'à (tranche suivante − 1), dernière = ouverte (null)
@@ -508,7 +557,7 @@ class SupplierProductSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Product
         fields = ['id', 'name', 'slug', 'base_price_tnd', 'old_price_tnd',
-                  'moq', 'unit', 'stock_qty', 'in_stock', 'sold_count',   # ← in_stock ajouté
+                  'moq', 'unit', 'stock_qty', 'in_stock', 'sold_count',
                   'rating_avg', 'rating_count', 'status',
                   'is_free_shipping', 'category_name', 'primary_image', 'created_at']
 

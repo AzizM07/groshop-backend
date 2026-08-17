@@ -417,15 +417,54 @@ def trending_products(request):
 
 
 # ── Products List ─────────────────────────────────────────────────
+def _descendant_category_ids(root_id):
+    """
+    Retourne l'id de la catégorie + tous ses descendants (récursif).
+    Category a un parent self-FK simple (pas MPTT), on descend niveau par niveau.
+    """
+    all_ids = {root_id}
+    frontier = {root_id}
+    while frontier:
+        children = set(
+            Category.objects.filter(parent_id__in=frontier).values_list('id', flat=True)
+        )
+        frontier = children - all_ids
+        all_ids |= frontier
+    return all_ids
+
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def products_list(request):
 
     products = _list_queryset().filter(status='approved')
 
-    category = request.query_params.get('category')
-    if category:
-        products = products.filter(category__slug=category)
+    # ── Filtre catégorie ──
+    # Priorité : category_id (UUID) > category (slug, rétrocompat)
+    # include_descendants=1 → inclut aussi tous les enfants (récursif)
+    category_id         = request.query_params.get('category_id')
+    category_slug       = request.query_params.get('category')
+    include_descendants = request.query_params.get('include_descendants') in ('1', 'true', 'yes')
+
+    if category_id:
+        try:
+            if include_descendants:
+                ids = _descendant_category_ids(category_id)
+                products = products.filter(category_id__in=ids)
+            else:
+                products = products.filter(category_id=category_id)
+        except (ValueError, TypeError):
+            products = products.none()
+    elif category_slug:
+        if include_descendants:
+            root = Category.objects.filter(slug=category_slug).first()
+            if root:
+                ids = _descendant_category_ids(root.id)
+                products = products.filter(category_id__in=ids)
+            else:
+                products = products.none()
+        else:
+            products = products.filter(category__slug=category_slug)
 
     supplier = request.query_params.get('supplier')
     if supplier:
@@ -457,8 +496,6 @@ def products_list(request):
         'total': total, 'limit': limit, 'offset': offset,
         'results': serializer.data,
     })
-
-
 # ── Product Detail ────────────────────────────────────────────────
 @api_view(['GET'])
 @permission_classes([AllowAny])

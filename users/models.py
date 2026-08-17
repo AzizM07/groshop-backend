@@ -30,7 +30,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('admin',    'Administrateur'),
     ]
 
-    # ⭐ NOUVEAU : langue préférée du user, persistée en base.
+    # ── Profil boutique (pour accès prix masqués) ──
+    BUSINESS_STATUS_CHOICES = [
+        ('none',     'Non soumis'),
+        ('pending',  'En attente'),
+        ('verified', 'Vérifié'),
+        ('rejected', 'Rejeté'),
+    ]
+
+    # ⭐ Langue préférée du user, persistée en base.
     # Nécessaire pour tout envoi asynchrone (push notifications) où il n'y a
     # pas de requête HTTP en cours pour lire le header X-Lang.
     LANGUAGES = [
@@ -39,6 +47,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         ('ar', 'العربية'),
     ]
 
+    # ── Identité ──
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email          = models.EmailField(unique=True)
     phone          = models.CharField(max_length=20, blank=True)
@@ -46,7 +55,23 @@ class User(AbstractBaseUser, PermissionsMixin):
     full_name      = models.CharField(max_length=150)
     avatar_url     = models.TextField(blank=True)
     role           = models.CharField(max_length=20, choices=ROLES, default='buyer')
-    language       = models.CharField(max_length=2, choices=LANGUAGES, default='fr')  # ⭐ NOUVEAU
+    language       = models.CharField(max_length=2, choices=LANGUAGES, default='fr')
+
+    # ── Profil boutique (accès prix masqués) ──
+    business_name             = models.CharField(max_length=200, blank=True)
+    business_rne              = models.CharField(max_length=50, blank=True)
+    business_patente          = models.CharField(max_length=50, blank=True)
+    business_document         = models.FileField(upload_to='business_docs/', blank=True, null=True)
+    business_status           = models.CharField(max_length=20, choices=BUSINESS_STATUS_CHOICES, default='none')
+    business_submitted_at     = models.DateTimeField(null=True, blank=True)
+    business_verified_at      = models.DateTimeField(null=True, blank=True)
+    business_verified_by      = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='business_verifications',
+    )
+    business_rejection_reason = models.TextField(blank=True)
+
+    # ── Statuts / dates ──
     is_verified    = models.BooleanField(default=False)
     is_active      = models.BooleanField(default=True)
     is_staff       = models.BooleanField(default=False)

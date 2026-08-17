@@ -46,7 +46,12 @@ class Product(models.Model):
         ('approved',       'Approuvé'),
         ('rejected',       'Rejeté'),
     ]
-
+    price_visibility = models.CharField(
+        max_length=20,
+        choices=[('public', 'Public'), ('verified_only', 'Boutiques vérifiées uniquement')],
+        default='public',
+        help_text='Si "verified_only", le prix est masqué aux users non-vérifiés.',
+    )
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     supplier       = models.ForeignKey('users.SupplierProfile', on_delete=models.CASCADE, related_name='products')
     category       = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name='products')
@@ -286,3 +291,5 @@ class Favorite(models.Model):
 
     def __str__(self):
         return f'{self.user_id} ♥ {self.product_id}'
+# Import des modèles d'accès prix (SupplierUserUnlock, ProductPriceUnlock, can_see_price)
+from .access_models import SupplierUserUnlock, ProductPriceUnlock, can_see_price  # noqa: E402, F401

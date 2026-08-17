@@ -1,6 +1,6 @@
 from django.urls import path
 from . import views
-
+from . import access_views
 urlpatterns = [
     # ── Racine + recherche ──
     path('',              views.products_list,      name='products-list'),
@@ -30,4 +30,11 @@ urlpatterns = [
     path('<uuid:pk>/similar/',         views.similar_products,        name='similar-products'),
     path('<uuid:pk>/reviews/',         views.product_reviews,         name='product-reviews'),
     path('<uuid:pk>/recommendations/', views.product_recommendations, name='product-recommendations'),
-]
+    # ── Accès prix masqués ──
+    path('access/check/<uuid:user_id>/',                      access_views.check_access,              name='access-check'),
+    path('access/my-unlocks/',                                access_views.my_unlocks,                name='access-my-unlocks'),
+    path('access/unlock-supplier/<uuid:user_id>/',            access_views.unlock_supplier_for_user,  name='access-unlock-supplier'),
+    path('access/unlock-product/<uuid:product_id>/',          access_views.unlock_product_for_user,   name='access-unlock-product'),
+    path('access/revoke-supplier/<uuid:unlock_id>/',          access_views.revoke_supplier_unlock,    name='access-revoke-supplier'),
+    path('access/revoke-product/<uuid:unlock_id>/',           access_views.revoke_product_unlock,     name='access-revoke-product'),
+    ]

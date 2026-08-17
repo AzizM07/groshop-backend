@@ -80,7 +80,11 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['id', 'email', 'full_name', 'phone', 'avatar_url', 'role', 'is_verified', 'created_at']
+        fields = [
+            'id', 'email', 'full_name', 'phone', 'avatar_url', 'role',
+            'is_verified', 'created_at',
+            'business_status', 'business_name',   # ⭐ AJOUTÉS
+        ]
 
 
 # ── Store (lecture) ───────────────────────────────────────────────
@@ -173,3 +177,36 @@ class AddressSerializer(serializers.ModelSerializer):
                     {f: 'Champ obligatoire.' for f in missing}
                 )
         return attrs
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUSINESS PROFILE (pour accès prix masqués)
+# ══════════════════════════════════════════════════════════════════
+class BusinessProfileSerializer(serializers.ModelSerializer):
+
+    business_document = serializers.FileField(required=False, allow_null=True)
+
+    class Meta:
+        model  = User
+        fields = [
+            'business_name', 'business_rne', 'business_patente',
+            'business_document', 'business_status',
+            'business_submitted_at', 'business_verified_at', 'business_rejection_reason',
+        ]
+        read_only_fields = [
+            'business_status', 'business_submitted_at',
+            'business_verified_at', 'business_rejection_reason',
+        ]
+
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+
+        # Toute soumission repasse en 'pending'
+        instance.business_status           = 'pending'
+        instance.business_submitted_at     = timezone.now()
+        instance.business_verified_at      = None
+        instance.business_rejection_reason = ''
+        instance.save()
+        return instance
