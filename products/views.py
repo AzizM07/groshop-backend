@@ -506,6 +506,7 @@ def product_detail(request, pk):
         ).prefetch_related(
             'images', 'price_tiers', 'variants', 'choice_groups__variants',
             'variant_combos__variants', 'variant_combos__price_tiers',
+            'customization_fields',   # ← AJOUT
         ).get(id=pk, status='approved')
     except Product.DoesNotExist:
         return Response({'error': 'Produit non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
@@ -944,3 +945,71 @@ def my_products(request):
     if st:
         qs = qs.filter(status=st)
     return Response(SupplierProductSerializer(qs, many=True).data)
+
+
+# ══════════════════════════════════════════════════════════════════
+# UPLOAD FICHIER DE PERSONNALISATION (photo/PDF/design uploadé par
+# l'acheteur depuis la popup "Personnaliser")
+# ══════════════════════════════════════════════════════════════════
+ALLOWED_CUSTOMIZATION_TYPES = {
+    'image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif',
+    'image/svg+xml',
+    'application/pdf',
+    'application/postscript',        # .ai .eps
+    'application/illustrator',       # .ai (variante)
+    'application/vnd.adobe.illustrator',
+    'text/plain',
+}
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@parser_classes([MultiPartParser, FormParser])
+def upload_customization_file(request):
+    """
+    Upload d'un fichier fourni par l'acheteur dans la popup 'Personnaliser'.
+    Compresse en WebP si c'est une image bitmap, sinon stocke tel quel.
+    """
+    f = request.FILES.get('file')
+    if not f:
+        return Response({'error': 'Aucun fichier.'}, status=400)
+    if f.content_type not in ALLOWED_CUSTOMIZATION_TYPES:
+        return Response(
+            {'error': 'Format non supporté (images, PDF, SVG, AI, EPS).'},
+            status=400,
+        )
+    if f.size > 15 * 1024 * 1024:
+        return Response({'error': 'Fichier trop volumineux (max 15 Mo).'}, status=400)
+
+    ext_map = {
+        'image/png': '.webp', 'image/jpeg': '.webp', 'image/jpg': '.webp', 'image/webp': '.webp',
+        'image/gif': '.gif', 'image/svg+xml': '.svg',
+        'application/pdf': '.pdf',
+        'application/postscript': '.eps',
+        'application/illustrator': '.ai',
+        'application/vnd.adobe.illustrator': '.ai',
+        'text/plain': '.txt',
+    }
+    is_bitmap = f.content_type in {'image/png', 'image/jpeg', 'image/jpg', 'image/webp'}
+
+    if is_bitmap:
+        img = Image.open(f)
+        img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img
+        img.thumbnail((2000, 2000))  # plus grand que produit : on veut la HD
+        buffer = BytesIO()
+        img.save(buffer, format='WEBP', quality=85)
+        buffer.seek(0)
+        key = f'customizations/{_uuid.uuid4().hex}.webp'
+        upload_file = InMemoryUploadedFile(
+            buffer, 'ImageField', key, 'image/webp',
+            buffer.getbuffer().nbytes, None,
+        )
+    else:
+        ext = ext_map.get(f.content_type, '.bin')
+        key = f'customizations/{_uuid.uuid4().hex}{ext}'
+        upload_file = f  # storage.save accepte l'UploadedFile tel quel
+
+    path = default_storage.save(key, upload_file)
+    url = default_storage.url(path)
+    if url.startswith('/'):
+        url = request.build_absolute_uri(url)
+    return Response({'url': url, 'filename': f.name}, status=201)

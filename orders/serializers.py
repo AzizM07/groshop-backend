@@ -1,6 +1,5 @@
 from rest_framework import serializers
-from .models import Order, SubOrder, OrderItem, CartItem
-
+from .models import Order, SubOrder, OrderItem, CartItem, CustomizationRequest  # ← ajout
 
 # ══════════════════════════════════════════════════════════════════
 # ORDER ITEM
@@ -11,11 +10,13 @@ class OrderItemSerializer(serializers.ModelSerializer):
     product_slug     = serializers.CharField(source='product.slug', read_only=True)
     product_category = serializers.CharField(source='product.category.name', read_only=True, allow_null=True, default=None)
     product_image    = serializers.SerializerMethodField()
-
+    is_customized        = serializers.BooleanField(read_only=True)
+    customization_values = serializers.JSONField(read_only=True)
     class Meta:
         model  = OrderItem
         fields = ['id', 'product_id', 'product_name', 'product_slug', 'product_category',
-                  'product_image', 'quantity', 'unit_price_tnd', 'total_tnd']
+                'product_image', 'quantity', 'unit_price_tnd', 'total_tnd',
+                'is_customized', 'customization_values']
 
     def get_product_image(self, obj):
         images = obj.product.images.all()
@@ -126,13 +127,26 @@ class CartItemSerializer(serializers.ModelSerializer):
     variant_data    = serializers.SerializerMethodField()
     unit_price_tnd  = serializers.DecimalField(source='unit_price', max_digits=10, decimal_places=3, read_only=True)
     total_price_tnd = serializers.DecimalField(source='total_price', max_digits=12, decimal_places=3, read_only=True)
-
+    is_customized        = serializers.BooleanField(read_only=True)
+    customization_values = serializers.JSONField(read_only=True)
+    quote_info           = serializers.SerializerMethodField()
     class Meta:
         model  = CartItem
         fields = ['id', 'quantity', 'variant', 'variant_data',
-                  'unit_price_tnd', 'total_price_tnd',
-                  'product', 'created_at', 'updated_at']
-
+                'unit_price_tnd', 'total_price_tnd',
+                'product', 'created_at', 'updated_at',
+                'is_customized', 'customization_values', 'quote_info']
+    def get_quote_info(self, obj):
+        if not obj.customization_request_id:
+            return None
+        r = obj.customization_request
+        return {
+            'id':               str(r.id),
+            'quoted_price_tnd': str(r.quoted_price_tnd) if r.quoted_price_tnd else None,
+            'quoted_at':        r.quoted_at.isoformat() if r.quoted_at else None,
+            'expires_at':       r.expires_at.isoformat() if r.expires_at else None,
+            'supplier_note':    r.supplier_note,
+        }
     def get_product(self, obj):
         p = obj.product
         images = p.images.all()
@@ -185,3 +199,60 @@ class CartItemSerializer(serializers.ModelSerializer):
             'name': getattr(v, 'name', ''),
             'sku':  getattr(v, 'sku', ''),
         }
+
+# ══════════════════════════════════════════════════════════════════
+# CUSTOMIZATION REQUEST (devis pour perso mode 'quote')
+# ══════════════════════════════════════════════════════════════════
+class CustomizationRequestSerializer(serializers.ModelSerializer):
+    """Lecture — utilisée dans la messagerie et le tableau de bord."""
+    product_id     = serializers.UUIDField(source='product.id',   read_only=True)
+    product_name   = serializers.CharField(source='product.name', read_only=True)
+    product_slug   = serializers.CharField(source='product.slug', read_only=True)
+    product_image  = serializers.SerializerMethodField()
+    buyer_id       = serializers.UUIDField(source='buyer.id',        read_only=True)
+    buyer_name     = serializers.CharField(source='buyer.full_name', read_only=True)
+    variant_name   = serializers.CharField(source='variant.name',    read_only=True, allow_null=True, default=None)
+    is_expired     = serializers.BooleanField(read_only=True)
+    total_tnd      = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = CustomizationRequest
+        fields = ['id',
+                  'product_id', 'product_name', 'product_slug', 'product_image',
+                  'buyer_id', 'buyer_name',
+                  'variant', 'variant_name',
+                  'quantity', 'values',
+                  'status',
+                  'quoted_price_tnd', 'quoted_at', 'expires_at', 'supplier_note',
+                  'total_tnd', 'is_expired',
+                  'conversation', 'created_at', 'updated_at']
+
+    def get_product_image(self, obj):
+        images = obj.product.images.all()
+        for img in images:
+            if img.is_primary:
+                return img.url
+        return images[0].url if images else None
+
+    def get_total_tnd(self, obj):
+        if obj.quoted_price_tnd is None:
+            return None
+        return str(obj.quoted_price_tnd * obj.quantity)
+
+
+class CustomizationRequestCreateSerializer(serializers.Serializer):
+    """Écriture — payload de la popup 'Personnaliser' côté acheteur."""
+    product_id  = serializers.UUIDField()
+    variant_id  = serializers.UUIDField(required=False, allow_null=True)
+    quantity    = serializers.IntegerField(min_value=1)
+    values      = serializers.ListField(
+        child=serializers.DictField(),
+        help_text="Liste [{field_id, label, field_type, value}]",
+    )
+
+
+class CustomizationRequestQuoteSerializer(serializers.Serializer):
+    """Écriture — payload 'Envoyer un devis' côté fournisseur."""
+    quoted_price_tnd = serializers.DecimalField(max_digits=10, decimal_places=3, min_value=0)
+    validity_days    = serializers.IntegerField(min_value=1, max_value=90, default=7)
+    supplier_note    = serializers.CharField(required=False, allow_blank=True, default='')

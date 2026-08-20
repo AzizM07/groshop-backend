@@ -8,6 +8,7 @@ from .models import (
     ProductChoiceGroup, ProductVariant,
     ProductVariantCombo, ProductComboPriceTier,
     Review, ReviewPhoto,
+    ProductCustomizationField,
 )
 
 
@@ -102,7 +103,18 @@ class ProductVariantComboSerializer(serializers.ModelSerializer):
     def get_variant_ids(self, obj):
         # ⚡ .all() → cache du prefetch_related('variant_combos__variants'), 0 requête
         return [str(v.id) for v in obj.variants.all()]
+# ── ProductCustomizationField (lecture) ───────────────────────────
+class ProductCustomizationFieldSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = ProductCustomizationField
+        fields = ['id', 'label', 'field_type', 'required', 'sort_order', 'constraints']
 
+
+# ── ProductCustomizationField (écriture, dans create/update produit) ─
+class _CustomizationFieldWrite(serializers.ModelSerializer):
+    class Meta:
+        model  = ProductCustomizationField
+        fields = ['label', 'field_type', 'required', 'sort_order', 'constraints']
 
 # ── Product List (carte) ──────────────────────────────────────────
 class ProductListSerializer(serializers.ModelSerializer):
@@ -133,7 +145,8 @@ class ProductListSerializer(serializers.ModelSerializer):
             'category_name',
             'years_active',
             'price_tiers',
-            'price_visibility', 'price_locked',   # ⭐ AJOUTÉS
+            'price_visibility', 'price_locked',
+            'allow_customization', 'customization_mode',      # ⭐ AJOUTÉS
         ]
 
     def get_primary_image(self, obj):
@@ -207,7 +220,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     specs          = serializers.SerializerMethodField()
     is_favorited   = serializers.SerializerMethodField()
     price_locked   = serializers.SerializerMethodField()  # ⭐ AJOUTÉ
-
+    customization_fields = ProductCustomizationFieldSerializer(many=True, read_only=True)
     # ── Champs du fournisseur (plats) ──
     supplier_name         = serializers.CharField(source='supplier.company_name', read_only=True, default='')
     supplier_slug         = serializers.CharField(source='supplier.slug', read_only=True, default='')
@@ -243,6 +256,9 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             'supplier_city', 'supplier_wilaya', 'supplier_verified',
             'category_id', 'category_name', 'category_slug',
             'is_favorited',
+            'allow_customization', 'customization_mode', 'customization_required',
+            'customization_extra_price_tnd', 'customization_instructions',
+            'customization_fields',
             'price_visibility', 'price_locked',   # ⭐ AJOUTÉS
         ]
 
@@ -399,11 +415,12 @@ class _VariantComboWrite(serializers.Serializer):
 
 
 class ProductCreateSerializer(serializers.ModelSerializer):
-    images         = _ImageWrite(many=True, required=False)
-    price_tiers    = _TierWrite(many=True)
-    shipping_tiers = _ShippingTierWrite(many=True, required=False)
-    choice_groups  = _ChoiceGroupWrite(many=True, required=False)
-    variant_combos = _VariantComboWrite(many=True, required=False)
+    images                = _ImageWrite(many=True, required=False)
+    price_tiers           = _TierWrite(many=True)
+    shipping_tiers        = _ShippingTierWrite(many=True, required=False)
+    choice_groups         = _ChoiceGroupWrite(many=True, required=False)
+    variant_combos        = _VariantComboWrite(many=True, required=False)
+    customization_fields  = _CustomizationFieldWrite(many=True, required=False)
 
     class Meta:
         model  = Product
@@ -413,10 +430,14 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             'in_stock', 'delivery_days',
             'shipping_mode', 'shipping_price_tnd',
             'shipping_block_size', 'shipping_block_price',
-            'status', 'images', 'price_tiers', 'shipping_tiers', 'choice_groups', 'variant_combos',
+            'status', 'images', 'price_tiers', 'shipping_tiers',
+            'choice_groups', 'variant_combos',
+            # ── Personnalisation ──
+            'allow_customization', 'customization_mode',
+            'customization_required', 'customization_extra_price_tnd',
+            'customization_instructions', 'customization_fields',
         ]
         read_only_fields = ['id']
-        # base_price_tnd, old_price_tnd, moq, is_free_shipping : dérivés dans create()
 
     def validate_status(self, value):
         if value not in ('draft', 'pending_review'):
@@ -447,7 +468,13 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             prev_q, prev_p = q, p
         return tiers
 
+    def validate_customization_fields(self, value):
+        if len(value) > 12:
+            raise serializers.ValidationError("Maximum 12 champs de personnalisation par produit.")
+        return value
+
     def validate(self, data):
+        # ── Livraison ──
         mode = data.get('shipping_mode', 'flat')
         if mode == 'tiered':
             st = data.get('shipping_tiers') or []
@@ -462,6 +489,18 @@ class ProductCreateSerializer(serializers.ModelSerializer):
                 prev = t['min_qty']
         if mode == 'per_block' and (not data.get('shipping_block_size') or not data.get('shipping_block_price')):
             raise serializers.ValidationError({'shipping_block_price': "Renseigne le palier et le frais par palier."})
+
+        # ── Personnalisation : cohérence ──
+        allow = data.get('allow_customization', False)
+        fields = data.get('customization_fields') or []
+        if allow and not fields:
+            raise serializers.ValidationError({
+                'customization_fields': "Ajoute au moins un champ que l'acheteur devra remplir."
+            })
+        if not allow and fields:
+            # Auto-clean : si perso désactivée, ignore les champs
+            data['customization_fields'] = []
+
         return data
 
     def _unique_slug(self, name):
@@ -472,21 +511,21 @@ class ProductCreateSerializer(serializers.ModelSerializer):
         return slug
 
     def create(self, validated_data):
-        images     = validated_data.pop('images', [])
-        tiers      = validated_data.pop('price_tiers', [])
-        ship_tiers = validated_data.pop('shipping_tiers', [])
-        groups     = validated_data.pop('choice_groups', [])
-        combos     = validated_data.pop('variant_combos', [])
+        images        = validated_data.pop('images', [])
+        tiers         = validated_data.pop('price_tiers', [])
+        ship_tiers    = validated_data.pop('shipping_tiers', [])
+        groups        = validated_data.pop('choice_groups', [])
+        combos        = validated_data.pop('variant_combos', [])
+        custom_fields = validated_data.pop('customization_fields', [])
 
         tiers = sorted(tiers, key=lambda t: t['min_qty'])
-        # Bornes hautes auto : jusqu'à (tranche suivante − 1), dernière = ouverte (null)
         for i, t in enumerate(tiers):
             t['max_qty'] = (tiers[i + 1]['min_qty'] - 1) if i + 1 < len(tiers) else None
 
         first = tiers[0]
         mode  = validated_data.get('shipping_mode', 'flat')
         validated_data['base_price_tnd']   = first['price_tnd']
-        validated_data['old_price_tnd']    = first.get('old_price_tnd')   # solde 1re tranche → barré carte
+        validated_data['old_price_tnd']    = first.get('old_price_tnd')
         validated_data['moq']              = first['min_qty']
         validated_data['is_free_shipping'] = (mode == 'free')
 
@@ -505,7 +544,6 @@ class ProductCreateSerializer(serializers.ModelSerializer):
                 for t in sorted(ship_tiers, key=lambda x: x['min_qty'])
             ])
 
-        # ── Groupes + variantes, avec lookup (nom_groupe, nom_variante) → instance ──
         variant_lookup = {}
         for gi, g in enumerate(groups):
             variants = g.pop('variants', [])
@@ -518,25 +556,21 @@ class ProductCreateSerializer(serializers.ModelSerializer):
             for v in created_variants:
                 variant_lookup[(g['name'], v.name)] = v
 
-        # ── Prix par combinaison de variantes (optionnel) ──────────────
         for c in combos:
             selections  = c.get('selections') or []
             combo_tiers = c.get('price_tiers') or []
             if not selections or not combo_tiers:
                 continue
-
             variant_instances = [
                 variant_lookup[(s['group'], s['variant'])]
                 for s in selections
                 if (s['group'], s['variant']) in variant_lookup
             ]
             if len(variant_instances) != len(selections):
-                continue  # sélection incomplète/invalide → ignorée silencieusement
-
+                continue
             combo_tiers = sorted(combo_tiers, key=lambda t: t['min_qty'])
             for i, t in enumerate(combo_tiers):
                 t['max_qty'] = (combo_tiers[i + 1]['min_qty'] - 1) if i + 1 < len(combo_tiers) else None
-
             combo_key = '|'.join(sorted(str(v.id) for v in variant_instances))
             combo = ProductVariantCombo.objects.create(product=product, combo_key=combo_key)
             combo.variants.set(variant_instances)
@@ -544,9 +578,21 @@ class ProductCreateSerializer(serializers.ModelSerializer):
                 ProductComboPriceTier(combo=combo, **t) for t in combo_tiers
             ])
 
+        # ── Champs de personnalisation ──
+        if custom_fields:
+            ProductCustomizationField.objects.bulk_create([
+                ProductCustomizationField(
+                    product=product,
+                    label=f['label'],
+                    field_type=f['field_type'],
+                    required=f.get('required', True),
+                    sort_order=f.get('sort_order', i),
+                    constraints=f.get('constraints', {}),
+                )
+                for i, f in enumerate(custom_fields)
+            ])
+
         return product
-
-
 # ── Liste fournisseur (page "Mes produits") ───────────────────────
 class SupplierProductSerializer(serializers.ModelSerializer):
 

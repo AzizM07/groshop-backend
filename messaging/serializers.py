@@ -11,13 +11,22 @@ class MessageSerializer(serializers.ModelSerializer):
     sender_id   = serializers.UUIDField(source='sender.id', read_only=True)
     sender_name = serializers.CharField(source='sender.full_name', read_only=True)
     sender_role = serializers.CharField(source='sender.role', read_only=True)
+    quote       = serializers.SerializerMethodField()  # ← AJOUT
 
     class Meta:
         model  = Message
         fields = ['id', 'sender_id', 'sender_name', 'sender_role',
                   'content', 'attachment_url',
-                  'is_read', 'created_at']
+                  'is_read', 'created_at',
+                  'message_type', 'quote']  # ← AJOUT
 
+    def get_quote(self, obj):
+        """Bulle spéciale : renvoie les infos du devis quand le message y est lié."""
+        if not obj.customization_request_id:
+            return None
+        # Import local pour éviter les cycles
+        from orders.serializers import CustomizationRequestSerializer
+        return CustomizationRequestSerializer(obj.customization_request).data
 
 # ══════════════════════════════════════════════════════════════════
 # Helpers communs pour construire les objets buyer/supplier

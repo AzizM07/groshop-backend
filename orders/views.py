@@ -10,13 +10,16 @@ from django.shortcuts import get_object_or_404
 from analytics.tracking import attribute_order
 from products.models import Product
 from users.models import Address
-
-from .models import Order, SubOrder, OrderItem, CartItem
+from django.utils import timezone
+from datetime import timedelta
+from .models import Order, SubOrder, OrderItem, CartItem, CustomizationRequest
 from .serializers import (
     OrderListSerializer, OrderDetailSerializer, CreateOrderSerializer,
     CartItemSerializer, SupplierSubOrderSerializer,
+    CustomizationRequestSerializer,
+    CustomizationRequestCreateSerializer,
+    CustomizationRequestQuoteSerializer,
 )
-
 
 # ── Prefetch réutilisable ─────────────────────────────────────────
 ITEMS_PREFETCH = Prefetch(
@@ -103,22 +106,45 @@ def create_order(request):
 
         for item_data in items:
             product_id = item_data.get('product_id')
+            cart_item_id = item_data.get('cart_item_id')  # ← nouveau : id du CartItem source
             quantity   = int(item_data.get('quantity', 1))
 
-            try:
-                product = Product.objects.select_related('supplier').get(
-                    id=product_id, status='approved')
-            except Product.DoesNotExist:
-                raise Exception(f'Produit {product_id} non trouvé.')
+            # Si cart_item_id fourni, on charge le CartItem pour récupérer perso + prix verrouillé
+            cart_item = None
+            if cart_item_id:
+                try:
+                    cart_item = CartItem.objects.select_related(
+                        'product', 'product__supplier', 'customization_request',
+                    ).get(id=cart_item_id, buyer=request.user)
+                    product = cart_item.product
+                    quantity = cart_item.quantity
+                except CartItem.DoesNotExist:
+                    raise Exception(f'Item panier {cart_item_id} introuvable.')
+            else:
+                try:
+                    product = Product.objects.select_related('supplier').get(
+                        id=product_id, status='approved')
+                except Product.DoesNotExist:
+                    raise Exception(f'Produit {product_id} non trouvé.')
 
             if quantity < product.moq:
                 raise Exception(
                     f'Quantité minimum pour {product.name} est {product.moq}.')
 
-            tier = product.price_tiers.filter(
-                min_qty__lte=quantity
-            ).order_by('-min_qty').first()
-            unit_price   = tier.price_tnd if tier else product.base_price_tnd
+            # Prix résolu : property unit_price du CartItem gère les 3 cas (quote/fixed/standard)
+            if cart_item is not None:
+                unit_price = cart_item.unit_price
+            else:
+                tier = product.price_tiers.filter(
+                    min_qty__lte=quantity
+                ).order_by('-min_qty').first()
+                unit_price = tier.price_tnd if tier else product.base_price_tnd
+                # Item ajouté sans passer par le panier : applique le surcoût fixed si perso
+                if (product.allow_customization
+                        and product.customization_mode == 'fixed'
+                        and item_data.get('is_customized')):
+                    unit_price = unit_price + product.customization_extra_price_tnd
+
             total        = unit_price * quantity
             total_order += total
 
@@ -130,13 +156,15 @@ def create_order(request):
                     'subtotal': 0,
                 }
             suppliers_items[supplier_id]['items'].append({
-                'product':    product,
-                'quantity':   quantity,
-                'unit_price': unit_price,
-                'total':      total,
+                'product':               product,
+                'quantity':              quantity,
+                'unit_price':            unit_price,
+                'total':                 total,
+                'is_customized':         cart_item.is_customized if cart_item else bool(item_data.get('is_customized')),
+                'customization_values':  cart_item.customization_values if cart_item else (item_data.get('customization_values') or []),
+                'customization_request': cart_item.customization_request if cart_item else None,
             })
             suppliers_items[supplier_id]['subtotal'] += total
-
         for supplier_id, supplier_data in suppliers_items.items():
             sub_order = SubOrder.objects.create(
                 order        = order,
@@ -146,11 +174,14 @@ def create_order(request):
             )
             for item in supplier_data['items']:
                 OrderItem.objects.create(
-                    sub_order      = sub_order,
-                    product        = item['product'],
-                    quantity       = item['quantity'],
-                    unit_price_tnd = item['unit_price'],
-                    total_tnd      = item['total'],
+                    sub_order             = sub_order,
+                    product               = item['product'],
+                    quantity              = item['quantity'],
+                    unit_price_tnd        = item['unit_price'],
+                    total_tnd             = item['total'],
+                    is_customized         = item.get('is_customized', False),
+                    customization_values  = item.get('customization_values', []),
+                    customization_request = item.get('customization_request'),
                 )
                 Product.objects.filter(id=item['product'].id).update(
                     sold_count=F('sold_count') + item['quantity'])
@@ -314,17 +345,20 @@ def _cart_owner_fields(request):
 def cart_view(request):
     if request.method == 'GET':
         items = CartItem.objects.filter(**_cart_filter(request)).select_related(
-            'product', 'product__supplier', 'variant',
+            'product', 'product__supplier', 'variant', 'customization_request',
         ).prefetch_related('product__images', 'product__price_tiers')
         return Response(CartItemSerializer(items, many=True).data)
 
-    product_id = request.data.get('product_id')
-    quantity   = request.data.get('quantity', 1)
-    variant_id = request.data.get('variant_id') or None
+    # ── POST : ajout au panier ──
+    product_id                = request.data.get('product_id')
+    quantity                  = request.data.get('quantity', 1)
+    variant_id                = request.data.get('variant_id') or None
+    is_customized             = bool(request.data.get('is_customized', False))
+    customization_values      = request.data.get('customization_values') or []
+    customization_request_id  = request.data.get('customization_request_id') or None
 
     if not product_id:
         return Response({'error': 'product_id requis.'}, status=400)
-
     try:
         quantity = int(quantity)
     except (TypeError, ValueError):
@@ -338,17 +372,79 @@ def cart_view(request):
     if quantity < product.moq:
         quantity = product.moq
 
+    # ── Gate : produit en mode 'quote' → obligatoirement via devis ──
+    if product.allow_customization and product.customization_mode == 'quote':
+        if not is_customized or not customization_request_id:
+            return Response(
+                {'error': 'Ce produit nécessite un devis accepté avant ajout au panier.'},
+                status=400,
+            )
+
+    # ── Gate : produit fixed + required → obligatoirement personnalisé ──
+    if (product.allow_customization
+            and product.customization_mode == 'fixed'
+            and product.customization_required
+            and not is_customized):
+        return Response(
+            {'error': 'Ce produit doit être personnalisé pour être commandé.'},
+            status=400,
+        )
+
+    # ── Cas : item customisé ──
+    if is_customized:
+        if not product.allow_customization:
+            return Response({'error': 'Ce produit n\'accepte pas la personnalisation.'}, status=400)
+
+        # Validation des champs obligatoires
+        provided_field_ids = {str(v.get('field_id')) for v in customization_values}
+        for field in product.customization_fields.all():
+            if field.required and str(field.id) not in provided_field_ids:
+                return Response(
+                    {'error': f'Le champ "{field.label}" est obligatoire.'},
+                    status=400,
+                )
+
+        # Mode 'quote' : la demande doit exister, être acceptée, appartenir au buyer
+        req = None
+        if product.customization_mode == 'quote':
+            if not request.user.is_authenticated:
+                return Response({'error': 'Connexion requise pour un item sur devis.'}, status=401)
+            try:
+                req = CustomizationRequest.objects.get(id=customization_request_id)
+            except CustomizationRequest.DoesNotExist:
+                return Response({'error': 'Devis introuvable.'}, status=404)
+            if req.buyer_id != request.user.id:
+                return Response({'error': "Ce devis ne vous appartient pas."}, status=403)
+            if req.status != 'accepted':
+                return Response({'error': "Ce devis n'est pas accepté."}, status=400)
+            if req.product_id != product.id:
+                return Response({'error': 'Devis / produit incohérents.'}, status=400)
+
+        # Création directe (pas d'update_or_create : chaque perso est unique)
+        item = CartItem.objects.create(
+            product=product,
+            variant_id=variant_id,
+            quantity=quantity,
+            is_customized=True,
+            customization_values=customization_values,
+            customization_request=req,
+            **_cart_owner_fields(request),
+        )
+        return Response(CartItemSerializer(item).data, status=status.HTTP_201_CREATED)
+
+    # ── Cas : item standard (comportement existant) ──
     item, created = CartItem.objects.update_or_create(
         product=product,
         variant_id=variant_id,
+        is_customized=False,
         **_cart_filter(request),
         defaults={'quantity': quantity, **_cart_owner_fields(request)},
     )
 
     return Response(
         CartItemSerializer(item).data,
-        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
-
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )
 
 @api_view(['PATCH', 'DELETE'])
 @permission_classes([AllowAny])
@@ -432,3 +528,269 @@ def cart_merge(request):
             merged += 1
 
     return Response({'merged': merged})
+
+
+# ══════════════════════════════════════════════════════════════════
+# CUSTOMIZATION REQUESTS (devis pour perso mode 'quote')
+# ══════════════════════════════════════════════════════════════════
+
+def _format_quote_request_message(req):
+    """Résumé texte de la demande, posté comme premier message dans la conv."""
+    lines = [
+        f"📋 Demande de personnalisation — {req.product.name}",
+        f"Quantité souhaitée : {req.quantity}",
+        "",
+        "Détails :",
+    ]
+    for v in req.values or []:
+        label = v.get('label', '(sans nom)')
+        value = v.get('value', '')
+        ftype = v.get('field_type', 'text')
+        if ftype in ('image', 'file'):
+            lines.append(f"• {label} : {value}")
+        else:
+            lines.append(f"• {label} : {value}")
+    lines.append("")
+    lines.append("Merci de m'envoyer un devis avec le prix et le délai.")
+    return "\n".join(lines)
+
+
+def _format_quote_response_message(req):
+    """Message du devis posté par le fournisseur."""
+    total = req.quoted_price_tnd * req.quantity if req.quoted_price_tnd else 0
+    lines = [
+        f"💰 Devis proposé",
+        f"Prix unitaire : {req.quoted_price_tnd} TND × {req.quantity} = {total} TND",
+    ]
+    if req.expires_at:
+        lines.append(f"Validité : jusqu'au {req.expires_at.strftime('%d/%m/%Y')}")
+    if req.supplier_note:
+        lines.append("")
+        lines.append(req.supplier_note)
+    return "\n".join(lines)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def customization_requests(request):
+    """
+    GET  = liste des demandes de l'utilisateur (buyer OU supplier)
+    POST = crée une demande (buyer soumet la popup 'Personnaliser')
+    """
+    from messaging.models import Conversation, Message
+
+    if request.method == 'GET':
+        role = getattr(request.user, 'role', 'buyer')
+        if role == 'supplier' and hasattr(request.user, 'supplier_profile'):
+            qs = CustomizationRequest.objects.filter(
+                product__supplier=request.user.supplier_profile,
+            )
+        else:
+            qs = CustomizationRequest.objects.filter(buyer=request.user)
+        qs = qs.select_related(
+            'product', 'buyer', 'variant',
+        ).prefetch_related('product__images').order_by('-created_at')
+        return Response(CustomizationRequestSerializer(qs, many=True).data)
+
+    # ── POST : création par l'acheteur ──
+    if getattr(request.user, 'role', None) != 'buyer':
+        return Response(
+            {'error': 'Seuls les acheteurs peuvent demander une personnalisation.'},
+            status=403,
+        )
+
+    ser = CustomizationRequestCreateSerializer(data=request.data)
+    if not ser.is_valid():
+        return Response(ser.errors, status=400)
+    data = ser.validated_data
+
+    try:
+        product = Product.objects.select_related('supplier').get(
+            id=data['product_id'], status='approved',
+        )
+    except Product.DoesNotExist:
+        return Response({'error': 'Produit non trouvé.'}, status=404)
+
+    if not product.allow_customization:
+        return Response({'error': "Ce produit n'est pas personnalisable."}, status=400)
+
+    # Validation des champs obligatoires
+    provided_field_ids = {str(v.get('field_id')) for v in data['values']}
+    for field in product.customization_fields.all():
+        if field.required and str(field.id) not in provided_field_ids:
+            return Response(
+                {'error': f'Le champ "{field.label}" est obligatoire.'},
+                status=400,
+            )
+
+    with transaction.atomic():
+        # Conversation (get_or_create — évite les doublons si plusieurs demandes)
+        conv, _ = Conversation.objects.get_or_create(
+            buyer      = request.user,
+            supplier   = product.supplier,
+            product    = product,
+        )
+
+        req = CustomizationRequest.objects.create(
+            buyer       = request.user,
+            product     = product,
+            variant_id  = data.get('variant_id') or None,
+            quantity    = data['quantity'],
+            values      = data['values'],
+            status      = 'pending',
+            conversation= conv,
+        )
+
+        # Message quote_request dans la conv
+        Message.objects.create(
+            conversation          = conv,
+            sender                = request.user,
+            content               = _format_quote_request_message(req),
+            message_type          = 'quote_request',
+            customization_request = req,
+        )
+        conv.last_msg_at = timezone.now()
+        conv.save(update_fields=['last_msg_at'])
+
+    return Response(CustomizationRequestSerializer(req).data, status=201)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customization_request_quote(request, pk):
+    """Fournisseur envoie un devis (prix + validité) pour une demande pending."""
+    from messaging.models import Message
+
+    if not hasattr(request.user, 'supplier_profile'):
+        return Response({'error': 'Compte fournisseur requis.'}, status=403)
+
+    try:
+        req = CustomizationRequest.objects.select_related(
+            'product', 'product__supplier', 'conversation',
+        ).get(id=pk)
+    except CustomizationRequest.DoesNotExist:
+        return Response({'error': 'Demande introuvable.'}, status=404)
+
+    if req.product.supplier_id != request.user.supplier_profile.id:
+        return Response({'error': "Cette demande n'est pas adressée à votre boutique."}, status=403)
+
+    if req.status not in ('pending', 'quoted'):
+        return Response({'error': "Impossible de coter une demande déjà finalisée."}, status=400)
+
+    ser = CustomizationRequestQuoteSerializer(data=request.data)
+    if not ser.is_valid():
+        return Response(ser.errors, status=400)
+    data = ser.validated_data
+
+    with transaction.atomic():
+        req.quoted_price_tnd = data['quoted_price_tnd']
+        req.quoted_at        = timezone.now()
+        req.expires_at       = timezone.now() + timedelta(days=data['validity_days'])
+        req.supplier_note    = data.get('supplier_note', '')
+        req.status           = 'quoted'
+        req.save()
+
+        if req.conversation_id:
+            Message.objects.create(
+                conversation          = req.conversation,
+                sender                = request.user,
+                content               = _format_quote_response_message(req),
+                message_type          = 'quote_response',
+                customization_request = req,
+            )
+            req.conversation.last_msg_at = timezone.now()
+            req.conversation.save(update_fields=['last_msg_at'])
+
+    return Response(CustomizationRequestSerializer(req).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customization_request_accept(request, pk):
+    """Buyer accepte le devis → crée un CartItem avec prix verrouillé."""
+    from messaging.models import Message
+
+    try:
+        req = CustomizationRequest.objects.select_related(
+            'product', 'conversation',
+        ).get(id=pk)
+    except CustomizationRequest.DoesNotExist:
+        return Response({'error': 'Demande introuvable.'}, status=404)
+
+    if req.buyer_id != request.user.id:
+        return Response({'error': "Cette demande ne vous appartient pas."}, status=403)
+    if req.status != 'quoted':
+        return Response({'error': "Aucun devis à accepter."}, status=400)
+    if req.is_expired:
+        req.status = 'expired'
+        req.save(update_fields=['status'])
+        return Response({'error': "Ce devis a expiré."}, status=400)
+
+    with transaction.atomic():
+        cart_item = CartItem.objects.create(
+            buyer                 = request.user,
+            product               = req.product,
+            variant_id            = req.variant_id,
+            quantity              = req.quantity,
+            is_customized         = True,
+            customization_values  = req.values,
+            customization_request = req,
+        )
+        req.status = 'accepted'
+        req.save(update_fields=['status'])
+
+        if req.conversation_id:
+            Message.objects.create(
+                conversation          = req.conversation,
+                sender                = request.user,
+                content               = "✅ Devis accepté — ajouté au panier.",
+                message_type          = 'quote_accepted',
+                customization_request = req,
+            )
+            req.conversation.last_msg_at = timezone.now()
+            req.conversation.save(update_fields=['last_msg_at'])
+
+    return Response({
+        'request':   CustomizationRequestSerializer(req).data,
+        'cart_item': CartItemSerializer(cart_item).data,
+    }, status=201)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def customization_request_reject(request, pk):
+    """Buyer OU fournisseur refuse la demande/le devis."""
+    from messaging.models import Message
+
+    try:
+        req = CustomizationRequest.objects.select_related(
+            'product', 'product__supplier', 'conversation',
+        ).get(id=pk)
+    except CustomizationRequest.DoesNotExist:
+        return Response({'error': 'Demande introuvable.'}, status=404)
+
+    is_buyer    = req.buyer_id == request.user.id
+    is_supplier = (hasattr(request.user, 'supplier_profile')
+                   and req.product.supplier_id == request.user.supplier_profile.id)
+    if not (is_buyer or is_supplier):
+        return Response({'error': 'Non autorisé.'}, status=403)
+
+    if req.status in ('accepted', 'rejected', 'expired'):
+        return Response({'error': "Cette demande est déjà finalisée."}, status=400)
+
+    with transaction.atomic():
+        req.status = 'rejected'
+        req.save(update_fields=['status'])
+        if req.conversation_id:
+            who = "L'acheteur" if is_buyer else "Le fournisseur"
+            Message.objects.create(
+                conversation          = req.conversation,
+                sender                = request.user,
+                content               = f"❌ {who} a refusé le devis.",
+                message_type          = 'quote_rejected',
+                customization_request = req,
+            )
+            req.conversation.last_msg_at = timezone.now()
+            req.conversation.save(update_fields=['last_msg_at'])
+
+    return Response(CustomizationRequestSerializer(req).data)

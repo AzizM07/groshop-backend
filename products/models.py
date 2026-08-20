@@ -38,6 +38,12 @@ SHIPPING_MODES = [
     ('per_block', 'Par palier'),
 ]
 
+CUSTOMIZATION_MODES = [
+    ('fixed', 'Prix fixe'),
+    ('quote', 'Sur devis'),
+]
+
+
 class Product(models.Model):
 
     STATUS = [
@@ -92,6 +98,22 @@ class Product(models.Model):
     shipping_block_size  = models.PositiveIntegerField(default=10)                          # mode 'per_block' : tous les N articles
     shipping_block_price = models.DecimalField(max_digits=10, decimal_places=3, default=0)  # mode 'per_block' : + M DT par palier
     delivery_days        = models.PositiveIntegerField(default=3)
+
+    # ── Personnalisation ──
+    allow_customization           = models.BooleanField(default=False)
+    customization_mode            = models.CharField(
+        max_length=10, choices=CUSTOMIZATION_MODES, default='fixed',
+        help_text="'fixed' = surcoût pré-fixé ; 'quote' = fournisseur cote après avoir vu la demande.",
+    )
+    customization_required        = models.BooleanField(
+        default=False,
+        help_text="Mode 'fixed' uniquement : la perso est-elle obligatoire pour commander ?",
+    )
+    customization_extra_price_tnd = models.DecimalField(
+        max_digits=10, decimal_places=3, default=0,
+        help_text="Mode 'fixed' uniquement : surcoût par unité (0 = inclus dans le prix).",
+    )
+    customization_instructions    = models.TextField(blank=True, default='')
 
     class Meta:
         db_table = 'products'
@@ -192,7 +214,7 @@ class ProductVariant(models.Model):
         return f'{self.product.name} — {self.name}'
 
 
-# ── ProductVariantCombo (NOUVEAU) ─────────────────────────────────
+# ── ProductVariantCombo ───────────────────────────────────────────
 class ProductVariantCombo(models.Model):
     """
     Combinaison précise (une variante par groupe) avec SON PROPRE barème.
@@ -212,7 +234,7 @@ class ProductVariantCombo(models.Model):
         return f'combo {self.combo_key} → {self.product_id}'
 
 
-# ── ProductComboPriceTier (NOUVEAU) ───────────────────────────────
+# ── ProductComboPriceTier ─────────────────────────────────────────
 class ProductComboPriceTier(models.Model):
     """Barème propre à une combinaison (mêmes règles que ProductPriceTier)."""
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -228,6 +250,40 @@ class ProductComboPriceTier(models.Model):
 
     def __str__(self):
         return f'{self.combo_id} | {self.min_qty}+ → {self.price_tnd} TND'
+
+
+# ── ProductCustomizationField ─────────────────────────────────────
+class ProductCustomizationField(models.Model):
+    """
+    Un champ que l'acheteur doit remplir quand il personnalise le produit.
+    Défini par le fournisseur au moment de la création du produit.
+    Ex. label='Prénom à graver', field_type='text', required=True
+    """
+    FIELD_TYPES = [
+        ('text',   'Texte court'),
+        ('image',  'Image'),
+        ('file',   'Fichier'),
+        ('number', 'Nombre'),
+        ('color',  'Couleur'),
+    ]
+
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product     = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='customization_fields')
+    label       = models.CharField(max_length=200)
+    field_type  = models.CharField(max_length=10, choices=FIELD_TYPES)
+    required    = models.BooleanField(default=True)
+    sort_order  = models.IntegerField(default=0)
+    constraints = models.JSONField(
+        default=dict, blank=True,
+        help_text="Contraintes optionnelles : {max_chars, max_file_mb, accepted_formats: []}",
+    )
+
+    class Meta:
+        db_table = 'product_customization_fields'
+        ordering = ['sort_order']
+
+    def __str__(self):
+        return f'{self.product.name} — {self.label}'
 
 
 # ── Review ────────────────────────────────────────────────────────
@@ -291,5 +347,7 @@ class Favorite(models.Model):
 
     def __str__(self):
         return f'{self.user_id} ♥ {self.product_id}'
+
+
 # Import des modèles d'accès prix (SupplierUserUnlock, ProductPriceUnlock, can_see_price)
 from .access_models import SupplierUserUnlock, ProductPriceUnlock, can_see_price  # noqa: E402, F401

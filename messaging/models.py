@@ -34,6 +34,14 @@ class Conversation(models.Model):
 
 class Message(models.Model):
 
+    MESSAGE_TYPES = [
+        ('text',           'Texte'),
+        ('quote_request',  'Demande de devis'),   # envoyé par l'acheteur à la soumission de la popup perso
+        ('quote_response', 'Réponse de devis'),   # envoyé par le fournisseur avec le prix
+        ('quote_accepted', 'Devis accepté'),      # message système à l'acceptation
+        ('quote_rejected', 'Devis refusé'),       # message système au refus
+    ]
+
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     conversation   = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='messages')
     sender         = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sent_messages')
@@ -42,13 +50,21 @@ class Message(models.Model):
     is_read        = models.BooleanField(default=False)
     created_at     = models.DateTimeField(auto_now_add=True)
 
+    # ── Type de message + lien devis ──
+    message_type          = models.CharField(max_length=20, choices=MESSAGE_TYPES, default='text')
+    customization_request = models.ForeignKey(
+        'orders.CustomizationRequest',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='messages',
+        help_text="Uniquement pour les messages liés à un devis de personnalisation",
+    )
+
     class Meta:
         db_table = 'messages'
         ordering = ['created_at']
         indexes = [
-            # accélère le poll incrémental (created_at > cursor) par conversation
             models.Index(fields=['conversation', 'created_at']),
-            # accélère le comptage des non-lus / marquage lu
             models.Index(fields=['conversation', 'is_read']),
         ]
 
